@@ -36,6 +36,7 @@ class FoVAE(pl.LightningModule):
         # grad_clip=100,
         grad_skip_threshold=1000,
         do_add_pos_encoding=True,
+        do_use_beta_norm=True,
     ):
         super().__init__()
         self.n_steps = n_steps
@@ -46,11 +47,12 @@ class FoVAE(pl.LightningModule):
         else:
             self.num_channels = patch_channels
         self.lr = lr
-        self.beta = beta
+
+        input_dim = self.patch_dim * self.patch_dim * self.num_channels
         self.encoder = nn.Sequential(
-            View((-1, self.patch_dim * self.patch_dim * self.num_channels)),
+            View((-1, input_dim)),
             nn.GELU(),
-            nn.Linear(self.patch_dim * self.patch_dim * self.num_channels, 1024),
+            nn.Linear(input_dim, 1024),
             nn.GELU(),
             nn.Linear(1024, 256),
             nn.GELU(),
@@ -62,9 +64,10 @@ class FoVAE(pl.LightningModule):
             nn.GELU(),
             nn.Linear(256, 1024),
             nn.GELU(),
-            nn.Linear(1024, self.patch_dim * self.patch_dim * self.num_channels),
+            nn.Linear(1024, input_dim),
             View((-1, self.num_channels, self.patch_dim, self.patch_dim)),
         )
+        self._beta = beta
         # self.encoder = nn.Sequential(
         #     # nn.Conv2d(3, 32, 4, 2, 1),          # B,  32, 32, 32
         #     # nn.ReLU(True),
@@ -100,6 +103,14 @@ class FoVAE(pl.LightningModule):
         # self.grad_clip = grad_clip
         self.grad_skip_threshold = grad_skip_threshold
         self.do_add_pos_encoding = do_add_pos_encoding
+        self.do_use_beta_norm = do_use_beta_norm
+        if self.do_use_beta_norm:
+            self.beta = (beta * z_dim) / input_dim  # according to beta-vae paper
+            print(
+                f"Using beta_norm value of {self.beta:.6f} as beta, calculated from unnormalized beta {beta:.6f}"
+            )
+        else:
+            self.beta = beta
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -257,17 +268,21 @@ class FoVAE(pl.LightningModule):
                 n_pos_channels = 2 if self.do_add_pos_encoding else 0
                 return g[:, :-n_pos_channels, :, :]
 
-            tensorboard.add_images("Real Images", remove_pos_channels_from_batch(x[:32]), global_step=0)
+            tensorboard.add_images("Real Images", x[:32], global_step=0)
             tensorboard.add_images(
-                "Reconstructed Images", remove_pos_channels_from_batch(x_recon[:32]), global_step=self.global_step
+                "Reconstructed Images",
+                remove_pos_channels_from_batch(x_recon[:32]),
+                global_step=self.global_step,
             )
-
 
             # TODO: this traversal stuff makes no sense on sub-image patches!
 
             def stack_traversal_output(g):
                 # stack by interp image, then squeeze out the singular batch dimension and index out the 2 position channels
-                return [remove_pos_channels_from_batch(torch.stack(dt).squeeze(1)) for dt in traversal_abs]
+                return [
+                    remove_pos_channels_from_batch(torch.stack(dt).squeeze(1))
+                    for dt in traversal_abs
+                ]
 
             img = self._add_pos_encodings_to_img_batch(x[[0]])
             traversal_abs = self.latent_traverse(self.get_patch_zs(img), range_limit=3, step=0.5)
