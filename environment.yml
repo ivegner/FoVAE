@@ -1,0 +1,15 @@
+name: IP
+channels:
+  - pytorch-nightly # for Apple MPS support
+  - conda-forge
+dependencies:
+    - python=3.9
+    - pip>=19.0
+    - pytorch
+    - torchvision
+    - jupyter
+    - numpy
+    - imageio
+    - pip:
+      - "pytorch-lightning[extra]"
+
