@@ -30,18 +30,21 @@ class FoVAE(pl.LightningModule):
         patch_dim=5,
         patch_channels=3,
         z_dim=10,
-        n_steps: int = 10,
+        n_steps: int = 1,
         lr=1e-3,
         beta=1,
         # grad_clip=100,
         grad_skip_threshold=1000,
+        do_add_pos_encoding=True,
     ):
         super().__init__()
         self.n_steps = n_steps
         self.z_dim = z_dim
         self.patch_dim = patch_dim
-        # TODO: patch x, y coords
-        self.num_channels = patch_channels
+        if do_add_pos_encoding:
+            self.num_channels = patch_channels + 2
+        else:
+            self.num_channels = patch_channels
         self.lr = lr
         self.beta = beta
         self.encoder = nn.Sequential(
@@ -96,21 +99,38 @@ class FoVAE(pl.LightningModule):
 
         # self.grad_clip = grad_clip
         self.grad_skip_threshold = grad_skip_threshold
+        self.do_add_pos_encoding = do_add_pos_encoding
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
 
-    def forward(self, x, y):
-        b = x.size(0)
-        patch = x[:, :, : self.patch_dim, : self.patch_dim]
-        mu, logvar = self._encode(patch.reshape(b, -1))
-        z = reparametrize(mu, logvar)
-        patch_recon = self._decode(z).reshape_as(patch)
+    def forward(self, x: torch.Tensor, y: torch.Tensor):
+        b, c, h, w = x.size()
 
-        loss, rec_loss, kl_div = self._loss(patch, patch_recon, mu, logvar)
+        if self.do_add_pos_encoding:
+            x_full = self._add_pos_encodings_to_img_batch(x)
+        else:
+            x_full = x
+
+        patch_loss, patch_rec_loss, patch_kl_div = (
+            0.0,
+            0.0,
+            0.0,
+        )
+        for step in range(self.n_steps):
+            patch = x_full[:, :, : self.patch_dim, : self.patch_dim]
+            mu, logvar = self._encode_patch(patch)
+            z = reparametrize(mu, logvar)
+            patch_recon = self._decode_patch(z)
+            assert torch.is_same_size(patch_recon, patch)
+            loss, rec_loss, kl_div = self._loss(patch, patch_recon, mu, logvar)
+            patch_loss += loss
+            patch_rec_loss += rec_loss
+            patch_kl_div += kl_div
+
         return (loss, rec_loss, kl_div), patch_recon, mu, logvar
 
-    def _loss(self, x, x_recon, mu, logvar):
+    def _loss(self, x: torch.Tensor, x_recon: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor):
         # reconstruction losses are summed over all elements and batch
         # recon loss is MSE ONLY FOR DECODERS PRODUCING GAUSSIAN DISTRIBUTIONS
         recon_loss = F.mse_loss(x_recon, x, reduction="sum")
@@ -128,48 +148,61 @@ class FoVAE(pl.LightningModule):
 
         return (recon_loss + self.beta * kl_diverge), recon_loss, kl_diverge
 
-    def _encode(self, x):
+    def _encode_patch(self, x: torch.Tensor):
         distributions = self.encoder(x)
         mu = distributions[:, : self.z_dim]
         logvar = distributions[:, self.z_dim :]
         return mu, logvar
 
-    def _decode(self, z):
+    def _decode_patch(self, z):
         return self.decoder(z)
 
+    def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
+        b, c, h, w = x.size()
+        # add position encoding as in wattersSpatialBroadcastDecoder2019
+        width_pos = torch.linspace(-1, 1, w)
+        height_pos = torch.linspace(-1, 1, w)
+        xb, yb = torch.meshgrid(width_pos, height_pos)
+        # match dimensions of x except for channels
+        xb = xb.expand(b, 1, -1, -1).to(x.device)
+        yb = yb.expand(b, 1, -1, -1).to(x.device)
+        x_full = torch.concat((x, xb, yb), dim=1)
+        assert x_full.size() == torch.Size([b, c + 2, h, w])
+        return x_full
+
     # generate n=num images using the model
-    def generate(self, num):
+    def generate(self, num: int):
         self.eval()
         z = torch.randn(num, self.z_dim)
         with torch.no_grad():
-            return self._decode(z).cpu()
+            return self._decode_patch(z).cpu()
 
-    # returns pytorch tensor z
-    def get_z(self, im):
+    # returns z for position-augmented patch
+    def get_patch_zs(self, patch_with_pos: torch.Tensor):
+        assert patch_with_pos.ndim == 4
         self.eval()
-        im = torch.unsqueeze(im, dim=0)
 
         with torch.no_grad():
-            mu, logvar = self._encode(im)
+            mu, logvar = self._encode_patch(patch_with_pos)
             z = reparametrize(mu, logvar)
 
         return z
 
-    def linear_interpolate(self, im1, im2):
-        self.eval()
-        z1 = self.get_z(im1)
-        z2 = self.get_z(im2)
+    # def linear_interpolate(self, im1, im2):
+    #     self.eval()
+    #     z1 = self.get_z(im1)
+    #     z2 = self.get_z(im2)
 
-        factors = np.linspace(1, 0, num=10)
-        result = []
+    #     factors = np.linspace(1, 0, num=10)
+    #     result = []
 
-        with torch.no_grad():
-            for f in factors:
-                z = f * z1 + (1 - f) * z2
-                im = torch.squeeze(self._decode(z).cpu())
-                result.append(im)
+    #     with torch.no_grad():
+    #         for f in factors:
+    #             z = f * z1 + (1 - f) * z2
+    #             im = torch.squeeze(self._decode_patch(z).cpu())
+    #             result.append(im)
 
-        return result
+    #     return result
 
     def latent_traverse(self, z, range_limit=3, step=0.5, around_z=False):
         self.eval()
@@ -185,7 +218,7 @@ class FoVAE(pl.LightningModule):
                         interp_z[:, row] += val
                     else:
                         interp_z[:, row] = val
-                    sample = self._decode(interp_z.to(self.device)).squeeze(0).data.cpu()
+                    sample = self._decode_patch(interp_z.to(self.device)).data.cpu()
                     row_samples.append(sample)
                 samples.append(row_samples)
         return samples
@@ -220,25 +253,42 @@ class FoVAE(pl.LightningModule):
             # img = torch.concat((real, recon), dim=1)
 
             # step constant bc real images don't change
-            tensorboard.add_images("Real Images", x[:32], global_step=0)
+            def remove_pos_channels_from_batch(g):
+                n_pos_channels = 2 if self.do_add_pos_encoding else 0
+                return g[:, :-n_pos_channels, :, :]
+
+            tensorboard.add_images("Real Images", remove_pos_channels_from_batch(x[:32]), global_step=0)
             tensorboard.add_images(
-                "Reconstructed Images", x_recon[:32], global_step=self.global_step
+                "Reconstructed Images", remove_pos_channels_from_batch(x_recon[:32]), global_step=self.global_step
             )
-            traversal_abs = self.latent_traverse(self.get_z(x_recon[0]), range_limit=3, step=0.5)
+
+
+            # TODO: this traversal stuff makes no sense on sub-image patches!
+
+            def stack_traversal_output(g):
+                # stack by interp image, then squeeze out the singular batch dimension and index out the 2 position channels
+                return [remove_pos_channels_from_batch(torch.stack(dt).squeeze(1)) for dt in traversal_abs]
+
+            img = self._add_pos_encodings_to_img_batch(x[[0]])
+            traversal_abs = self.latent_traverse(self.get_patch_zs(img), range_limit=3, step=0.5)
+            images_by_row_and_interp = stack_traversal_output(traversal_abs)
+
             tensorboard.add_image(
                 "Absolute Latent Traversal",
                 torchvision.utils.make_grid(
-                    torch.concat([torch.stack(dt) for dt in traversal_abs]), nrow=self.z_dim
+                    torch.concat(images_by_row_and_interp), nrow=self.z_dim
                 ),
                 global_step=self.global_step,
             )
-            traversal_abs = self.latent_traverse(
-                self.get_z(x_recon[0]), range_limit=3, step=0.5, around_z=True
+            traversal_around = self.latent_traverse(
+                self.get_patch_zs(img), range_limit=3, step=0.5, around_z=True
             )
+            images_by_row_and_interp = stack_traversal_output(traversal_around)
+
             tensorboard.add_image(
                 "Latent Traversal Around Z",
                 torchvision.utils.make_grid(
-                    torch.concat([torch.stack(dt) for dt in traversal_abs]), nrow=self.z_dim
+                    torch.concat(images_by_row_and_interp), nrow=self.z_dim
                 ),
                 global_step=self.global_step,
             )
