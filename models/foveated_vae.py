@@ -171,7 +171,7 @@ class FoVAE(pl.LightningModule):
         else:
             x_full = x
 
-        patch_loss, patch_rec_lh, patch_kl_div = (
+        patch_loss, patch_rec_loss, patch_kl_div = (
             0.0,
             0.0,
             0.0,
@@ -188,12 +188,12 @@ class FoVAE(pl.LightningModule):
 
             patch_recon = self._decode_patch(z)
             assert torch.is_same_size(patch_recon, patch)
-            loss, rec_lh, kl_div = self._loss(patch, patch_recon, z, mu, logvar)
+            loss, rec_loss, kl_div = self._loss(patch, patch_recon, z, mu, logvar)
             patch_loss += loss
-            patch_rec_lh += rec_lh
+            patch_rec_loss += rec_loss
             patch_kl_div += kl_div
 
-        return (patch_loss, patch_rec_lh, patch_kl_div), patch_recon, mu, logvar
+        return (patch_loss, patch_rec_loss, patch_kl_div), patch_recon, mu, logvar
 
     def _loss(self, x: torch.Tensor, x_recon: torch.Tensor, z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor):
         def gaussian_likelihood(x, x_hat, logscale):
@@ -218,7 +218,7 @@ class FoVAE(pl.LightningModule):
             # log_qzx = q.log_prob(z)
             # log_pz = p.log_prob(z)
             # kl = (log_qzx - log_pz)
-            kl = torch.distributions.kl_divergence(p, q)
+            kl = torch.distributions.kl_divergence(q, p)
             kl = kl.sum(-1)
             return kl
 
@@ -226,9 +226,9 @@ class FoVAE(pl.LightningModule):
 
         try:
             # can error due to bad predictions
-            reconstruction_likelihood = gaussian_likelihood(x, x_recon, 0.).mean()
+            recon_loss = -gaussian_likelihood(x, x_recon, 0.).mean()
         except ValueError as e:
-            reconstruction_likelihood = torch.nan
+            recon_loss = torch.nan
 
         try:
             kl = kl_divergence(z, mu, std).mean()
@@ -246,11 +246,21 @@ class FoVAE(pl.LightningModule):
         # # divergence from standard-normal
         # kl_diverge = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp().pow(2))
 
+        # var_ratio = (p.scale / q.scale).pow(2)
+        # t1 = ((p.loc - q.loc) / q.scale).pow(2)
+        # return 0.5 * (var_ratio + t1 - 1 - var_ratio.log())
+
+        # var_ratio = std.pow(2) = logvar.exp()
+        # t1 = mu.pow(2)
+        # return 0.5 * (logvar.exp() + mu.pow(2) - 1 - logvar)
+
+
         # # divide losses by batch size
         # recon_loss /= x.shape[0]
         # kl_diverge /= x.shape[0]
 
-        return (self.beta * kl-reconstruction_likelihood), reconstruction_likelihood, kl
+        # maximize reconstruction likelihood (minimize its negative), minimize kl divergence
+        return (self.beta * kl + recon_loss), recon_loss, kl
 
     def _encode_patch(self, x: torch.Tensor):
         distributions = self.encoder(x)
@@ -329,26 +339,26 @@ class FoVAE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        (loss, rec_lh, kl_div), x_recon, _, _ = self.forward(x, y)
+        (loss, rec_loss, kl_div), x_recon, _, _ = self.forward(x, y)
         self.log("train_loss", loss)
-        self.log("train_rec_lh", rec_lh, prog_bar=True)
+        self.log("train_rec_loss", rec_loss, prog_bar=True)
         self.log("train_kl_div", kl_div, prog_bar=True)
 
         # self._optimizer_step(loss)
         skip_update = float(torch.isnan(loss))  # TODO: skip on grad norm
         if skip_update:
-            print(f"Skipping update! {loss=}, {rec_lh=}, {kl_div=}")
+            print(f"Skipping update! {loss=}, {rec_loss=}, {kl_div=}")
 
-        self.log("n_skipped_steps", skip_update, on_epoch=True, logger=True, reduce_fx=torch.sum)
+        self.log("n_skipped_steps", skip_update, on_epoch=True, on_step=False, logger=True, prog_bar=True, reduce_fx=torch.sum)
         # self.log(grad_norm, skip_update, on_epoch=True, logger=True)
 
         return None if skip_update else loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        (loss, rec_lh, kl_div), x_recon, _, _ = self.forward(x, y)
+        (loss, rec_loss, kl_div), x_recon, _, _ = self.forward(x, y)
         self.log("val_loss", loss)
-        self.log("val_rec_lh", rec_lh)
+        self.log("val_rec_loss", rec_loss)
         self.log("val_kl_div", kl_div)
         if batch_idx == 0:
             tensorboard = self.logger.experiment
