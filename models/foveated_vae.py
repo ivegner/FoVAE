@@ -23,54 +23,65 @@ class View(nn.Module):
     def forward(self, tensor):
         return tensor.view(self.size)
 
-# class UpBlock(nn.Module):
-#     def __init__(self, from_sample_dim, to_z_dim, hidden_ff_out_dims=None):
-#         if not hidden_ff_out_dims:
-#             hidden_ff_out_dims = []
+class UpBlock(nn.Module):
+    def __init__(self, from_sample_dim, to_z_dim, hidden_ff_out_dims=None):
+        super().__init__()
+        self.out_z_dim = to_z_dim
 
-#         # if no hidden dims provided, will contain just z dim (*2 bc mean and logvar)
-#         hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim*2]
+        if not hidden_ff_out_dims:
+            hidden_ff_out_dims = []
 
-#         stack = []
-#         last_out_dim = from_sample_dim
-#         for nn_out_dim in hidden_ff_out_dims:
-#             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
-#             last_out_dim = nn_out_dim
+        # if no hidden dims provided, will contain just z dim (*2 bc mean and logvar)
+        hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim*2]
 
-#         self.encoder = nn.Sequential(
-#             View((-1, from_sample_dim)),
-#             *stack
-#         )
+        stack = []
+        last_out_dim = from_sample_dim
+        for nn_out_dim in hidden_ff_out_dims:
+            stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
+            last_out_dim = nn_out_dim
 
-#     def forward(self, x):
-#         distributions = self.encoder(x)
-#         mu = distributions[:, : self.z_dim]
-#         logvar = distributions[:, self.z_dim :]
-#         # TODO: sample?
-#         return mu, logvar
+        self.encoder = nn.Sequential(
+            View((-1, from_sample_dim)),
+            *stack
+        )
+
+    def forward(self, x):
+        distributions = self.encoder(x)
+        mu = distributions[:, : self.out_z_dim]
+        logvar = distributions[:, self.out_z_dim :]
+        return mu, logvar
 
 
-# class DownBlock(nn.Module):
-#     def __init__(self, from_sample_dim, to_z_dim, hidden_ff_out_dims=None):
-#         if not hidden_ff_out_dims:
-#             hidden_ff_out_dims = []
+class DownBlock(nn.Module):
+    def __init__(self, from_dim, to_dim, hidden_ff_out_dims=None):
+        super().__init__()
 
-#         # if no hidden dims provided, will contain just z dim (*2 bc mean and logvar)
-#         hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim*2]
+        if not hidden_ff_out_dims:
+            hidden_ff_out_dims = []
 
-#         stack = []
-#         last_out_dim = from_sample_dim
-#         for nn_out_dim in hidden_ff_out_dims:
-#             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
-#             last_out_dim = nn_out_dim
+        # if no hidden dims provided, will contain just to_dim
+        hidden_ff_out_dims = [*hidden_ff_out_dims, to_dim]
 
-#         self.decoder = nn.Sequential(
-#             View((-1, from_sample_dim)),
-#             *stack
-#         )
+        stack = []
+        last_out_dim = from_dim
+        for nn_out_dim in hidden_ff_out_dims:
+            stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
+            last_out_dim = nn_out_dim
 
-#     def forward(self, x):
-#         return self.decoder(x)
+        self.decoder = nn.Sequential(
+            View((-1, from_dim)),
+            *stack
+        )
+
+    def forward(self, x):
+        return self.decoder(x)
+
+# class Sampler(nn.Module):
+#     def __init__(self):
+#         super.__init__()
+
+#     def forward(self, mu, logvar):
+#         return reparam_sample(mu, logvar)
 
 class FoVAE(pl.LightningModule):
     def __init__(
@@ -97,24 +108,32 @@ class FoVAE(pl.LightningModule):
         self.lr = lr
 
         input_dim = self.patch_dim * self.patch_dim * self.num_channels
-        self.encoder = nn.Sequential(
-            View((-1, input_dim)),
-            nn.GELU(),
-            nn.Linear(input_dim, 1024),
-            nn.GELU(),
-            nn.Linear(1024, 256),
-            nn.GELU(),
-            nn.Linear(256, z_dim * 2),
-        )
-        self.decoder = nn.Sequential(
-            nn.GELU(),
-            nn.Linear(z_dim, 256),
-            nn.GELU(),
-            nn.Linear(256, 1024),
-            nn.GELU(),
-            nn.Linear(1024, input_dim),
-            View((-1, self.num_channels, self.patch_dim, self.patch_dim)),
-        )
+
+        self.encoders = nn.ModuleList([
+            UpBlock(input_dim, z_dim, [1024, 256]),
+        ])
+        self.decoders = nn.ModuleList([
+            DownBlock(z_dim, input_dim, [256, 1024]),
+        ])
+
+        # self.encoder = nn.Sequential(
+        #     View((-1, input_dim)),
+        #     nn.GELU(),
+        #     nn.Linear(input_dim, 1024),
+        #     nn.GELU(),
+        #     nn.Linear(1024, 256),
+        #     nn.GELU(),
+        #     nn.Linear(256, z_dim * 2),
+        # )
+        # self.decoder = nn.Sequential(
+        #     nn.GELU(),
+        #     nn.Linear(z_dim, 256),
+        #     nn.GELU(),
+        #     nn.Linear(256, 1024),
+        #     nn.GELU(),
+        #     nn.Linear(1024, input_dim),
+        #     View((-1, self.num_channels, self.patch_dim, self.patch_dim)),
+        # )
         self._beta = beta
         # self.encoder = nn.Sequential(
         #     # nn.Conv2d(3, 32, 4, 2, 1),          # B,  32, 32, 32
@@ -182,18 +201,16 @@ class FoVAE(pl.LightningModule):
 
         for step in range(self.n_steps):
             patch = x_full[:, :, : self.patch_dim, : self.patch_dim]
-            mu, logvar = self._encode_patch(patch)
+            sample_zs, z_mus, z_logvars = self._encode_patch(patch)
 
-            z = reparam_sample(mu, logvar)
-
-            patch_recon = self._decode_patch(z)
-            assert torch.is_same_size(patch_recon, patch)
-            loss, rec_loss, kl_div = self._loss(patch, patch_recon, z, mu, logvar)
+            patch_recons = self._decode_patch(sample_zs[-1])
+            assert torch.is_same_size(patch_recons[-1], patch)
+            loss, rec_loss, kl_div = self._loss(patch, patch_recons[-1], sample_zs[0], z_mus[0], z_logvars[0])
             patch_loss += loss
             patch_rec_loss += rec_loss
             patch_kl_div += kl_div
 
-        return (patch_loss, patch_rec_loss, patch_kl_div), patch_recon, mu, logvar
+        return (patch_loss, patch_rec_loss, patch_kl_div), patch_recons[-1], z_mus[0], z_logvars[0]
 
     def _loss(self, x: torch.Tensor, x_recon: torch.Tensor, z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor):
         def gaussian_likelihood(x, x_hat, logscale):
@@ -263,13 +280,25 @@ class FoVAE(pl.LightningModule):
         return (self.beta * kl + recon_loss), recon_loss, kl
 
     def _encode_patch(self, x: torch.Tensor):
-        distributions = self.encoder(x)
-        mu = distributions[:, : self.z_dim]
-        logvar = distributions[:, self.z_dim :]
-        return mu, logvar
+        mus, logvars, zs = [], [], []
+        for encoder in self.encoders:
+            z_mu, z_logvar = encoder(x)
+            z = reparam_sample(z_mu, z_logvar)
+            mus.append(z_mu)
+            logvars.append(z_logvar)
+            zs.append(z)
+        return zs, mus, logvars
+
 
     def _decode_patch(self, z):
-        return self.decoder(z)
+        decodings = []
+        for decoder in self.decoders:
+            dec = decoder(z)
+            decodings.append(dec)
+
+        decodings[-1] = decodings[-1].reshape((-1, self.num_channels, self.patch_dim, self.patch_dim))
+
+        return decodings
 
     def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
         b, c, h, w = x.size()
@@ -289,7 +318,7 @@ class FoVAE(pl.LightningModule):
         self.eval()
         z = torch.randn(num, self.z_dim)
         with torch.no_grad():
-            return self._decode_patch(z).cpu()
+            return self._decode_patch(z)[-1].cpu()
 
     # returns z for position-augmented patch
     def get_patch_zs(self, patch_with_pos: torch.Tensor):
@@ -297,10 +326,9 @@ class FoVAE(pl.LightningModule):
         self.eval()
 
         with torch.no_grad():
-            mu, logvar = self._encode_patch(patch_with_pos)
-            z = reparam_sample(mu, logvar)
+            zs, mus, logvars = self._encode_patch(patch_with_pos)
 
-        return z
+        return zs
 
     # def linear_interpolate(self, im1, im2):
     #     self.eval()
@@ -332,7 +360,7 @@ class FoVAE(pl.LightningModule):
                         interp_z[:, row] += val
                     else:
                         interp_z[:, row] = val
-                    sample = self._decode_patch(interp_z.to(self.device)).data.cpu()
+                    sample = self._decode_patch(interp_z.to(self.device))[-1].data.cpu()
                     row_samples.append(sample)
                 samples.append(row_samples)
         return samples
@@ -388,7 +416,7 @@ class FoVAE(pl.LightningModule):
                 ]
 
             img = self._add_pos_encodings_to_img_batch(x[[0]])
-            traversal_abs = self.latent_traverse(self.get_patch_zs(img), range_limit=3, step=0.5)
+            traversal_abs = self.latent_traverse(self.get_patch_zs(img)[-1], range_limit=3, step=0.5)
             images_by_row_and_interp = stack_traversal_output(traversal_abs)
 
             tensorboard.add_image(
@@ -399,7 +427,7 @@ class FoVAE(pl.LightningModule):
                 global_step=self.global_step,
             )
             traversal_around = self.latent_traverse(
-                self.get_patch_zs(img), range_limit=3, step=0.5, around_z=True
+                self.get_patch_zs(img)[-1], range_limit=3, step=0.5, around_z=True
             )
             images_by_row_and_interp = stack_traversal_output(traversal_around)
 
