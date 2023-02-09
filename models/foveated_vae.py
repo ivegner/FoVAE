@@ -9,7 +9,7 @@ import torchvision
 import torch.nn.init as init
 
 
-def reparametrize(mu, logvar):
+def reparam_sample(mu, logvar):
     std = torch.exp(0.5 * logvar)  # e^(1/2 * log(std^2))
     eps = torch.randn_like(std)  # random ~ N(0, 1)
     return mu + std * eps
@@ -23,6 +23,54 @@ class View(nn.Module):
     def forward(self, tensor):
         return tensor.view(self.size)
 
+# class UpBlock(nn.Module):
+#     def __init__(self, from_sample_dim, to_z_dim, hidden_ff_out_dims=None):
+#         if not hidden_ff_out_dims:
+#             hidden_ff_out_dims = []
+
+#         # if no hidden dims provided, will contain just z dim (*2 bc mean and logvar)
+#         hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim*2]
+
+#         stack = []
+#         last_out_dim = from_sample_dim
+#         for nn_out_dim in hidden_ff_out_dims:
+#             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
+#             last_out_dim = nn_out_dim
+
+#         self.encoder = nn.Sequential(
+#             View((-1, from_sample_dim)),
+#             *stack
+#         )
+
+#     def forward(self, x):
+#         distributions = self.encoder(x)
+#         mu = distributions[:, : self.z_dim]
+#         logvar = distributions[:, self.z_dim :]
+#         # TODO: sample?
+#         return mu, logvar
+
+
+# class DownBlock(nn.Module):
+#     def __init__(self, from_sample_dim, to_z_dim, hidden_ff_out_dims=None):
+#         if not hidden_ff_out_dims:
+#             hidden_ff_out_dims = []
+
+#         # if no hidden dims provided, will contain just z dim (*2 bc mean and logvar)
+#         hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim*2]
+
+#         stack = []
+#         last_out_dim = from_sample_dim
+#         for nn_out_dim in hidden_ff_out_dims:
+#             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
+#             last_out_dim = nn_out_dim
+
+#         self.decoder = nn.Sequential(
+#             View((-1, from_sample_dim)),
+#             *stack
+#         )
+
+#     def forward(self, x):
+#         return self.decoder(x)
 
 class FoVAE(pl.LightningModule):
     def __init__(
@@ -123,41 +171,86 @@ class FoVAE(pl.LightningModule):
         else:
             x_full = x
 
-        patch_loss, patch_rec_loss, patch_kl_div = (
+        patch_loss, patch_rec_lh, patch_kl_div = (
             0.0,
             0.0,
             0.0,
         )
+
+        # def get_next_patch():
+        #     pass
+
         for step in range(self.n_steps):
             patch = x_full[:, :, : self.patch_dim, : self.patch_dim]
             mu, logvar = self._encode_patch(patch)
-            z = reparametrize(mu, logvar)
+
+            z = reparam_sample(mu, logvar)
+
             patch_recon = self._decode_patch(z)
             assert torch.is_same_size(patch_recon, patch)
-            loss, rec_loss, kl_div = self._loss(patch, patch_recon, mu, logvar)
+            loss, rec_lh, kl_div = self._loss(patch, patch_recon, z, mu, logvar)
             patch_loss += loss
-            patch_rec_loss += rec_loss
+            patch_rec_lh += rec_lh
             patch_kl_div += kl_div
 
-        return (loss, rec_loss, kl_div), patch_recon, mu, logvar
+        return (patch_loss, patch_rec_lh, patch_kl_div), patch_recon, mu, logvar
 
-    def _loss(self, x: torch.Tensor, x_recon: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor):
-        # reconstruction losses are summed over all elements and batch
-        # recon loss is MSE ONLY FOR DECODERS PRODUCING GAUSSIAN DISTRIBUTIONS
-        recon_loss = F.mse_loss(x_recon, x, reduction="sum")
+    def _loss(self, x: torch.Tensor, x_recon: torch.Tensor, z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor):
+        def gaussian_likelihood(x, x_hat, logscale):
+            # scale = torch.exp(torch.ones_like(x_hat) * logscale)
+            mean = x_hat
+            dist = torch.distributions.Normal(mean, 1.0)
 
-        # see Appendix B from VAE paper:
-        # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-        # https://arxiv.org/abs/1312.6114
-        # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-        # divergence from standard-normal
-        kl_diverge = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp().pow(2))
+            # measure prob of seeing image under p(x|z)
+            log_pxz = dist.log_prob(x)
+            return log_pxz.sum(dim=(1, 2, 3))
 
-        # divide losses by batch size
-        recon_loss /= x.shape[0]
-        kl_diverge /= x.shape[0]
+        def kl_divergence(z, mu, std):
+            # --------------------------
+            # Monte carlo KL divergence
+            # --------------------------
+            # 1. define the first two probabilities (in this case Normal for both)
+            p = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(std))
+            q = torch.distributions.Normal(mu, std)
 
-        return (recon_loss + self.beta * kl_diverge), recon_loss, kl_diverge
+            # # 2. get the probabilities from the equation
+            # # log(q(z|x)) - log(p(z))
+            # log_qzx = q.log_prob(z)
+            # log_pz = p.log_prob(z)
+            # kl = (log_qzx - log_pz)
+            kl = torch.distributions.kl_divergence(p, q)
+            kl = kl.sum(-1)
+            return kl
+
+        std = torch.exp(logvar / 2)
+
+        try:
+            # can error due to bad predictions
+            reconstruction_likelihood = gaussian_likelihood(x, x_recon, 0.).mean()
+        except ValueError as e:
+            reconstruction_likelihood = torch.nan
+
+        try:
+            kl = kl_divergence(z, mu, std).mean()
+        except ValueError as e:
+            kl = torch.nan
+
+        # # reconstruction losses are summed over all elements and batch
+        # # recon loss is MSE ONLY FOR DECODERS PRODUCING GAUSSIAN DISTRIBUTIONS
+        # recon_loss = F.mse_loss(x_recon, x, reduction="sum")
+
+        # # see Appendix B from VAE paper:
+        # # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
+        # # https://arxiv.org/abs/1312.6114
+        # # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+        # # divergence from standard-normal
+        # kl_diverge = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp().pow(2))
+
+        # # divide losses by batch size
+        # recon_loss /= x.shape[0]
+        # kl_diverge /= x.shape[0]
+
+        return (self.beta * kl-reconstruction_likelihood), reconstruction_likelihood, kl
 
     def _encode_patch(self, x: torch.Tensor):
         distributions = self.encoder(x)
@@ -195,7 +288,7 @@ class FoVAE(pl.LightningModule):
 
         with torch.no_grad():
             mu, logvar = self._encode_patch(patch_with_pos)
-            z = reparametrize(mu, logvar)
+            z = reparam_sample(mu, logvar)
 
         return z
 
@@ -236,15 +329,15 @@ class FoVAE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        (loss, rec_loss, kl_div), x_recon, _, _ = self.forward(x, y)
+        (loss, rec_lh, kl_div), x_recon, _, _ = self.forward(x, y)
         self.log("train_loss", loss)
-        self.log("train_rec_loss", rec_loss, prog_bar=True)
+        self.log("train_rec_lh", rec_lh, prog_bar=True)
         self.log("train_kl_div", kl_div, prog_bar=True)
 
         # self._optimizer_step(loss)
         skip_update = float(torch.isnan(loss))  # TODO: skip on grad norm
         if skip_update:
-            print(f"Skipping update! {loss=}, {rec_loss=}, {kl_div=}")
+            print(f"Skipping update! {loss=}, {rec_lh=}, {kl_div=}")
 
         self.log("n_skipped_steps", skip_update, on_epoch=True, logger=True, reduce_fx=torch.sum)
         # self.log(grad_norm, skip_update, on_epoch=True, logger=True)
@@ -253,9 +346,9 @@ class FoVAE(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        (loss, rec_loss, kl_div), x_recon, _, _ = self.forward(x, y)
+        (loss, rec_lh, kl_div), x_recon, _, _ = self.forward(x, y)
         self.log("val_loss", loss)
-        self.log("val_rec_loss", rec_loss)
+        self.log("val_rec_lh", rec_lh)
         self.log("val_kl_div", kl_div)
         if batch_idx == 0:
             tensorboard = self.logger.experiment
