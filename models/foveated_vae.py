@@ -1,12 +1,16 @@
-from torch import optim, nn
-import torch.nn.functional as F
-import torch
-from torch.autograd import Variable
-import pytorch_lightning as pl
 import numpy as np
-from utils.visualization import imshow_unnorm
-import torchvision
+import pytorch_lightning as pl
+import torch
+import torch.nn.functional as F
 import torch.nn.init as init
+import torchvision
+from torch import nn, optim
+from typing import *
+
+import matplotlib.pyplot as plt
+
+from utils.visualization import imshow_unnorm
+from utils.foveation import get_gaussian_foveation_filter
 
 
 def reparam_sample(mu, logvar):
@@ -23,6 +27,7 @@ class View(nn.Module):
     def forward(self, tensor):
         return tensor.view(self.size)
 
+
 class UpBlock(nn.Module):
     def __init__(self, from_sample_dim, to_z_dim, hidden_ff_out_dims=None):
         super().__init__()
@@ -32,7 +37,7 @@ class UpBlock(nn.Module):
             hidden_ff_out_dims = []
 
         # if no hidden dims provided, will contain just z dim (*2 bc mean and logvar)
-        hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim*2]
+        hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim * 2]
 
         stack = []
         last_out_dim = from_sample_dim
@@ -40,10 +45,7 @@ class UpBlock(nn.Module):
             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
             last_out_dim = nn_out_dim
 
-        self.encoder = nn.Sequential(
-            View((-1, from_sample_dim)),
-            *stack
-        )
+        self.encoder = nn.Sequential(View((-1, from_sample_dim)), *stack)
 
     def forward(self, x):
         distributions = self.encoder(x)
@@ -68,13 +70,11 @@ class DownBlock(nn.Module):
             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
             last_out_dim = nn_out_dim
 
-        self.decoder = nn.Sequential(
-            View((-1, from_dim)),
-            *stack
-        )
+        self.decoder = nn.Sequential(View((-1, from_dim)), *stack)
 
     def forward(self, x):
         return self.decoder(x)
+
 
 # class Sampler(nn.Module):
 #     def __init__(self):
@@ -83,13 +83,18 @@ class DownBlock(nn.Module):
 #     def forward(self, mu, logvar):
 #         return reparam_sample(mu, logvar)
 
+
 class FoVAE(pl.LightningModule):
     def __init__(
         self,
+        image_dim=28,
+        fovea_radius=2,
         patch_dim=5,
         patch_channels=3,
         z_dim=10,
         n_steps: int = 1,
+        foveation_padding: Union[Literal["max"], int] = 14,#"max",
+        foveation_padding_mode: Literal["zeros", "replicate"] = "zeros",
         lr=1e-3,
         beta=1,
         # grad_clip=100,
@@ -98,23 +103,25 @@ class FoVAE(pl.LightningModule):
         do_use_beta_norm=True,
     ):
         super().__init__()
-        self.n_steps = n_steps
-        self.z_dim = z_dim
+
+        self.image_dim = image_dim
+        self.fovea_radius = fovea_radius
         self.patch_dim = patch_dim
+        self.z_dim = z_dim
+
+        self.n_steps = n_steps
         if do_add_pos_encoding:
             self.num_channels = patch_channels + 2
         else:
             self.num_channels = patch_channels
         self.lr = lr
+        self.foveation_padding = foveation_padding
+        self.foveation_padding_mode = foveation_padding_mode
 
         input_dim = self.patch_dim * self.patch_dim * self.num_channels
 
-        self.encoders = nn.ModuleList([
-            UpBlock(input_dim, z_dim, [1024, 256]),
-        ])
-        self.decoders = nn.ModuleList([
-            DownBlock(z_dim, input_dim, [256, 1024]),
-        ])
+        self.encoders = nn.ModuleList([UpBlock(input_dim, z_dim)])  # , [1024, 256]),
+        self.decoders = nn.ModuleList([DownBlock(z_dim, input_dim)])  # , [256, 1024]),
 
         # self.encoder = nn.Sequential(
         #     View((-1, input_dim)),
@@ -179,6 +186,21 @@ class FoVAE(pl.LightningModule):
         else:
             self.beta = beta
 
+        # image: (b, c, image_dim[0], image_dim[1])
+        # filters: (fov_h, fov_w, image_dim[0], image_dim[1])
+        # TODO: sparsify
+        self.register_buffer(
+            "foveation_filters",
+            torch.from_numpy(
+                get_gaussian_foveation_filter(
+                    image_dim=(image_dim, image_dim),
+                    fovea_radius=fovea_radius,
+                    image_out_dim=patch_dim,
+                    ring_sigma_scaling_factor=1.0,
+                ).astype(np.float32)
+            ),
+        )
+
         # Disable automatic optimization!
         # self.automatic_optimization = False
 
@@ -196,8 +218,32 @@ class FoVAE(pl.LightningModule):
             0.0,
         )
 
-        # def get_next_patch():
-        #     pass
+        # patches: (b, patch_dim*patch_dim, c, h_out, w_out)
+        patches = self._foveate_image(x_full)
+        # n_patches = patches.size(3) * patches.size(4)
+        # make grid of patches
+        patch_vis = torchvision.utils.make_grid(patches[0].permute(2, 3, 1, 0).view(-1, 3, self.patch_dim, self.patch_dim), nrow=patches.size(3), pad_value=1).cpu()
+        plt.imshow(patch_vis.permute(1, 2, 0) / 2 + 0.5)
+
+
+        # def get_next_patch_from_pos(pos: torch.Tensor):
+        #     # pos is a tensor of shape (b, 2)
+        #     # get (patch_dim, patch_dim) patch from x_full given by pos as center,
+        #     # where x and y are in [-1, 1]
+
+        #     # calculate l2 distances from pos to positions of all pixels in x_full
+        #     pos_l2_distances = torch.sqrt((x_full[:, -2:, :, :] - pos).pow(2).sum(dim=1))  # (b, h, w)
+        #     # find the (x, y) pixel index in x_full that has the lowest distance
+        #     min_distance_pos = pos_l2_distances.flatten(1, 2).argmin(dim=1)  # argmin over (b, h*w)
+        #     # convert to (b, x, y) pixel index
+        #     min_distance_pos = torch.stack(
+        #         (min_distance_pos // w, min_distance_pos % w), dim=-1
+        #     )
+        #     # get the patch from x_full
+        #     patch = x_full[:, :, min_distance_pos[:, 0] - self.patch_dim-1 , min_distance_pos[:, 1]]
+
+        def get_next_patch(curr_patch: torch.Tensor, curr_z: torch.Tensor):
+            curr_pos = curr_patch[:, -2:, :, :]
 
         for step in range(self.n_steps):
             patch = x_full[:, :, : self.patch_dim, : self.patch_dim]
@@ -205,14 +251,23 @@ class FoVAE(pl.LightningModule):
 
             patch_recons = self._decode_patch(sample_zs[-1])
             assert torch.is_same_size(patch_recons[-1], patch)
-            loss, rec_loss, kl_div = self._loss(patch, patch_recons[-1], sample_zs[0], z_mus[0], z_logvars[0])
+            loss, rec_loss, kl_div = self._loss(
+                patch, patch_recons[-1], sample_zs[0], z_mus[0], z_logvars[0]
+            )
             patch_loss += loss
             patch_rec_loss += rec_loss
             patch_kl_div += kl_div
 
         return (patch_loss, patch_rec_loss, patch_kl_div), patch_recons[-1], z_mus[0], z_logvars[0]
 
-    def _loss(self, x: torch.Tensor, x_recon: torch.Tensor, z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor):
+    def _loss(
+        self,
+        x: torch.Tensor,
+        x_recon: torch.Tensor,
+        z: torch.Tensor,
+        mu: torch.Tensor,
+        logvar: torch.Tensor,
+    ):
         def gaussian_likelihood(x, x_hat, logscale):
             # scale = torch.exp(torch.ones_like(x_hat) * logscale)
             mean = x_hat
@@ -243,7 +298,7 @@ class FoVAE(pl.LightningModule):
 
         try:
             # can error due to bad predictions
-            recon_loss = -gaussian_likelihood(x, x_recon, 0.).mean()
+            recon_loss = -gaussian_likelihood(x, x_recon, 0.0).mean()
         except ValueError as e:
             recon_loss = torch.nan
 
@@ -252,32 +307,58 @@ class FoVAE(pl.LightningModule):
         except ValueError as e:
             kl = torch.nan
 
-        # # reconstruction losses are summed over all elements and batch
-        # # recon loss is MSE ONLY FOR DECODERS PRODUCING GAUSSIAN DISTRIBUTIONS
-        # recon_loss = F.mse_loss(x_recon, x, reduction="sum")
-
-        # # see Appendix B from VAE paper:
-        # # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-        # # https://arxiv.org/abs/1312.6114
-        # # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-        # # divergence from standard-normal
-        # kl_diverge = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp().pow(2))
-
-        # var_ratio = (p.scale / q.scale).pow(2)
-        # t1 = ((p.loc - q.loc) / q.scale).pow(2)
-        # return 0.5 * (var_ratio + t1 - 1 - var_ratio.log())
-
-        # var_ratio = std.pow(2) = logvar.exp()
-        # t1 = mu.pow(2)
-        # return 0.5 * (logvar.exp() + mu.pow(2) - 1 - logvar)
-
-
-        # # divide losses by batch size
-        # recon_loss /= x.shape[0]
-        # kl_diverge /= x.shape[0]
-
         # maximize reconstruction likelihood (minimize its negative), minimize kl divergence
         return (self.beta * kl + recon_loss), recon_loss, kl
+
+    def _foveate_image(self, image: torch.Tensor):
+        # image: (b, c, h, w)
+        # filters: (out_h, out_w, rf_h, rf_w)
+        # out: (b, c, out_h, out_w, rf_h, rf_w)
+        # return torch.einsum("bchw,ijhw->bcij", image, self.foveation_filters)
+
+        b, c, h, w = image.shape
+
+        if self.foveation_padding_mode == "replicate":
+            padding_mode = "replicate"
+            pad_value = None
+        elif self.foveation_padding_mode == "zeros":
+            padding_mode = "constant"
+            pad_value = 0.0
+        else:
+            raise ValueError(f"Unknown padding mode: {self.foveation_padding_mode}")
+
+        if self.foveation_padding == "max":
+            padded_image = F.pad(
+                image,
+                (h, h, w, w),
+                mode=padding_mode,
+                value=pad_value,
+            )
+        elif self.foveation_padding > 0:
+            padded_image = F.pad(
+                image,
+                (
+                    self.foveation_padding,
+                    self.foveation_padding,
+                    self.foveation_padding,
+                    self.foveation_padding,
+                ),
+                mode=padding_mode,
+                value=pad_value,
+            )
+        else:
+            padded_image = image
+
+        pad_h, pad_w = padded_image.shape[-2:]
+
+        filter_rf_x, filter_rf_y = self.foveation_filters.shape[-2:]
+
+        return F.conv3d(
+            padded_image.view(b, 1, c, pad_h, pad_w),
+            self.foveation_filters.view(-1, 1, 1, filter_rf_x, filter_rf_y),
+            padding=0,
+            stride=1,
+        )
 
     def _encode_patch(self, x: torch.Tensor):
         mus, logvars, zs = [], [], []
@@ -289,14 +370,15 @@ class FoVAE(pl.LightningModule):
             zs.append(z)
         return zs, mus, logvars
 
-
     def _decode_patch(self, z):
         decodings = []
         for decoder in self.decoders:
             dec = decoder(z)
             decodings.append(dec)
 
-        decodings[-1] = decodings[-1].reshape((-1, self.num_channels, self.patch_dim, self.patch_dim))
+        decodings[-1] = decodings[-1].reshape(
+            (-1, self.num_channels, self.patch_dim, self.patch_dim)
+        )
 
         return decodings
 
@@ -304,7 +386,7 @@ class FoVAE(pl.LightningModule):
         b, c, h, w = x.size()
         # add position encoding as in wattersSpatialBroadcastDecoder2019
         width_pos = torch.linspace(-1, 1, w)
-        height_pos = torch.linspace(-1, 1, w)
+        height_pos = torch.linspace(-1, 1, h)
         xb, yb = torch.meshgrid(width_pos, height_pos)
         # match dimensions of x except for channels
         xb = xb.expand(b, 1, -1, -1).to(x.device)
@@ -377,7 +459,15 @@ class FoVAE(pl.LightningModule):
         if skip_update:
             print(f"Skipping update! {loss=}, {rec_loss=}, {kl_div=}")
 
-        self.log("n_skipped_steps", skip_update, on_epoch=True, on_step=False, logger=True, prog_bar=True, reduce_fx=torch.sum)
+        self.log(
+            "n_skipped_steps",
+            skip_update,
+            on_epoch=True,
+            on_step=False,
+            logger=True,
+            prog_bar=True,
+            reduce_fx=torch.sum,
+        )
         # self.log(grad_norm, skip_update, on_epoch=True, logger=True)
 
         return None if skip_update else loss
@@ -416,7 +506,9 @@ class FoVAE(pl.LightningModule):
                 ]
 
             img = self._add_pos_encodings_to_img_batch(x[[0]])
-            traversal_abs = self.latent_traverse(self.get_patch_zs(img)[-1], range_limit=3, step=0.5)
+            traversal_abs = self.latent_traverse(
+                self.get_patch_zs(img)[-1], range_limit=3, step=0.5
+            )
             images_by_row_and_interp = stack_traversal_output(traversal_abs)
 
             tensorboard.add_image(

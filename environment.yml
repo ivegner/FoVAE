@@ -10,6 +10,9 @@ dependencies:
     - jupyter
     - numpy
     - imageio
+    - scipy
+    - jupyter_client==7.3.2 # Fix https://discourse.jupyter.org/t/jupyter-notebook-zmq-message-arrived-on-closed-channel-error/17869/10
+    - tornado=6.1 # see above
     - pip:
       - "pytorch-lightning[extra]"
 
