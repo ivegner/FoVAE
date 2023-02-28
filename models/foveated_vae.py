@@ -6,11 +6,12 @@ import torch.nn.init as init
 import torchvision
 from torch import nn, optim
 from typing import *
+from copy import deepcopy
 
 import matplotlib.pyplot as plt
 
 from utils.visualization import imshow_unnorm
-from utils.foveation import get_gaussian_foveation_filter
+import utils.foveation as fov_utils
 
 
 def reparam_sample(mu, logvar):
@@ -89,7 +90,7 @@ class FoVAE(pl.LightningModule):
         self,
         image_dim=28,
         fovea_radius=2,
-        patch_dim=5,
+        patch_dim=6,
         patch_channels=3,
         z_dim=10,
         n_steps: int = 1,
@@ -189,20 +190,41 @@ class FoVAE(pl.LightningModule):
         # image: (b, c, image_dim[0], image_dim[1])
         # filters: (fov_h, fov_w, image_dim[0], image_dim[1])
         # TODO: sparsify
-        self.register_buffer(
-            "foveation_filters",
-            torch.from_numpy(
-                get_gaussian_foveation_filter(
-                    image_dim=(image_dim, image_dim),
-                    fovea_radius=fovea_radius,
-                    image_out_dim=patch_dim,
-                    ring_sigma_scaling_factor=1.0,
-                ).astype(np.float32)
-            ),
+        # self.register_buffer(
+        #     "foveation_filters",
+        #     torch.from_numpy(
+        #         get_gaussian_foveation_filter(
+        #             image_dim=(image_dim, image_dim),
+        #             fovea_radius=fovea_radius,
+        #             image_out_dim=patch_dim,
+        #             ring_sigma_scaling_factor=1.0,
+        #         ).astype(np.float32)
+        #     ),
+        # )
+        self.default_gaussian_filter_params = fov_utils.get_default_gaussian_foveation_filter_params(
+            image_dim=(image_dim, image_dim),
+            fovea_radius=fovea_radius,
+            image_out_dim=patch_dim,
+            ring_sigma_scaling_factor=1.0,
         )
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        def _recursive_to(x):
+            if isinstance(x, torch.Tensor):
+                return x.to(*args, **kwargs)
+            elif isinstance(x, dict):
+                return {k: _recursive_to(v) for k, v in x.items()}
+            elif isinstance(x, list):
+                return [_recursive_to(v) for v in x]
+            else:
+                return x
+
+        self.default_gaussian_filter_params = _recursive_to(self.default_gaussian_filter_params)
+
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         b, c, h, w = x.size()
@@ -219,11 +241,11 @@ class FoVAE(pl.LightningModule):
         )
 
         # patches: (b, patch_dim*patch_dim, c, h_out, w_out)
-        patches = self._foveate_image(x_full)
-        # n_patches = patches.size(3) * patches.size(4)
-        # make grid of patches
-        patch_vis = torchvision.utils.make_grid(patches[0].permute(2, 3, 1, 0).view(-1, 3, self.patch_dim, self.patch_dim), nrow=patches.size(3), pad_value=1).cpu()
-        plt.imshow(patch_vis.permute(1, 2, 0) / 2 + 0.5)
+        # patch_locs_x = torch.linspace(-1, 1, 30)
+        # patch_locs_y = torch.linspace(-1, 1, 30)
+        # patches = [self._foveate_to_loc(x_full, loc)[0] for loc in torch.cartesian_prod(patch_locs_x, patch_locs_y)]
+        # patch_vis = torchvision.utils.make_grid(patches, nrow=len(patch_locs_x), pad_value=1).cpu()
+        # plt.imshow(patch_vis.permute(1, 2, 0) / 2 + 0.5)
 
 
         # def get_next_patch_from_pos(pos: torch.Tensor):
@@ -246,7 +268,8 @@ class FoVAE(pl.LightningModule):
             curr_pos = curr_patch[:, -2:, :, :]
 
         for step in range(self.n_steps):
-            patch = x_full[:, :, : self.patch_dim, : self.patch_dim]
+            # patch = x_full[:, :, : self.patch_dim, : self.patch_dim]
+            patch = self._foveate_to_loc(x_full, torch.tensor([0.01, 0.01], device=x.device)).contiguous()
             sample_zs, z_mus, z_logvars = self._encode_patch(patch)
 
             patch_recons = self._decode_patch(sample_zs[-1])
@@ -310,11 +333,11 @@ class FoVAE(pl.LightningModule):
         # maximize reconstruction likelihood (minimize its negative), minimize kl divergence
         return (self.beta * kl + recon_loss), recon_loss, kl
 
-    def _foveate_image(self, image: torch.Tensor):
+    def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor):
         # image: (b, c, h, w)
+        # loc: (b, 2), where entries are in [-1, 1]
         # filters: (out_h, out_w, rf_h, rf_w)
         # out: (b, c, out_h, out_w, rf_h, rf_w)
-        # return torch.einsum("bchw,ijhw->bcij", image, self.foveation_filters)
 
         b, c, h, w = image.shape
 
@@ -327,7 +350,10 @@ class FoVAE(pl.LightningModule):
         else:
             raise ValueError(f"Unknown padding mode: {self.foveation_padding_mode}")
 
+
+        pad_offset = [0, 0]
         if self.foveation_padding == "max":
+            pad_offset = [h, w]
             padded_image = F.pad(
                 image,
                 (h, h, w, w),
@@ -335,6 +361,7 @@ class FoVAE(pl.LightningModule):
                 value=pad_value,
             )
         elif self.foveation_padding > 0:
+            pad_offset = [self.foveation_padding, self.foveation_padding]
             padded_image = F.pad(
                 image,
                 (
@@ -349,16 +376,72 @@ class FoVAE(pl.LightningModule):
         else:
             padded_image = image
 
-        pad_h, pad_w = padded_image.shape[-2:]
+        # pad_h, pad_w = padded_image.shape[-2:]
 
-        filter_rf_x, filter_rf_y = self.foveation_filters.shape[-2:]
+        # convert to (b, x, y) pixel index in the original image
+        loc = (loc + 1) / 2
+        loc = loc * torch.tensor([h, w], device=loc.device)
+        generic_center = torch.tensor([w // 2, h // 2], dtype=loc.dtype, device=loc.device)
 
-        return F.conv3d(
-            padded_image.view(b, 1, c, pad_h, pad_w),
-            self.foveation_filters.view(-1, 1, 1, filter_rf_x, filter_rf_y),
-            padding=0,
-            stride=1,
-        )
+        # move gaussian foveation params centers to center at loc in the padded image
+        gaussian_filter_params = deepcopy(self.default_gaussian_filter_params) # TODO: optimize
+        pad_offset = torch.tensor(pad_offset, dtype=loc.dtype, device=loc.device).unsqueeze(0)
+        for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
+            ring["mus"] += (loc - generic_center).unsqueeze(0) + pad_offset
+
+        # foveate
+        return fov_utils.apply_gaussian_foveation(padded_image, gaussian_filter_params)
+
+
+    # def _foveate_image(self, image: torch.Tensor):
+    #     # image: (b, c, h, w)
+    #     # filters: (out_h, out_w, rf_h, rf_w)
+    #     # out: (b, c, out_h, out_w, rf_h, rf_w)
+    #     # return torch.einsum("bchw,ijhw->bcij", image, self.foveation_filters)
+
+    #     b, c, h, w = image.shape
+
+    #     if self.foveation_padding_mode == "replicate":
+    #         padding_mode = "replicate"
+    #         pad_value = None
+    #     elif self.foveation_padding_mode == "zeros":
+    #         padding_mode = "constant"
+    #         pad_value = 0.0
+    #     else:
+    #         raise ValueError(f"Unknown padding mode: {self.foveation_padding_mode}")
+
+    #     if self.foveation_padding == "max":
+    #         padded_image = F.pad(
+    #             image,
+    #             (h, h, w, w),
+    #             mode=padding_mode,
+    #             value=pad_value,
+    #         )
+    #     elif self.foveation_padding > 0:
+    #         padded_image = F.pad(
+    #             image,
+    #             (
+    #                 self.foveation_padding,
+    #                 self.foveation_padding,
+    #                 self.foveation_padding,
+    #                 self.foveation_padding,
+    #             ),
+    #             mode=padding_mode,
+    #             value=pad_value,
+    #         )
+    #     else:
+    #         padded_image = image
+
+    #     pad_h, pad_w = padded_image.shape[-2:]
+
+    #     filter_rf_x, filter_rf_y = self.foveation_filters.shape[-2:]
+
+    #     return F.conv3d(
+    #         padded_image.view(b, 1, c, pad_h, pad_w),
+    #         self.foveation_filters.view(-1, 1, 1, filter_rf_x, filter_rf_y),
+    #         padding=0,
+    #         stride=1,
+    #     )
 
     def _encode_patch(self, x: torch.Tensor):
         mus, logvars, zs = [], [], []

@@ -1,11 +1,14 @@
+from matplotlib import pyplot as plt
 import numpy as np
 from typing import *
 
 import torch
 
+
 def _get_num_ring_pixels_from_r(r):
     """Get number of pixels in a square ring of given radius centered at a given point"""
     return ((r * 2) - 1) * 4
+
 
 def _get_indices_in_ring(x_extent, y_extent, x_center, y_center, radius):
     """Get indices of pixels in a square ring of given radius centered at (x_center, y_center)"""
@@ -14,8 +17,10 @@ def _get_indices_in_ring(x_extent, y_extent, x_center, y_center, radius):
 
     # get indices of pixels in ring
     ring_mask = np.zeros((x_extent, y_extent), dtype=bool)
-    ring_mask[x_center - radius: x_center + radius, y_center - radius: y_center + radius] = True
-    ring_mask[x_center - radius + 1: x_center + radius - 1, y_center - radius + 1 : y_center + radius - 1] = False
+    ring_mask[x_center - radius : x_center + radius, y_center - radius : y_center + radius] = True
+    ring_mask[
+        x_center - radius + 1 : x_center + radius - 1, y_center - radius + 1 : y_center + radius - 1
+    ] = False
 
     # plt.imshow(ring_mask)
 
@@ -23,6 +28,7 @@ def _get_indices_in_ring(x_extent, y_extent, x_center, y_center, radius):
     ring_xy = xy[ring_mask]
 
     return ring_xy
+
 
 def get_generic_sampled_ring_indices(
     x_extent, y_extent, x_center, y_center, fovea_radius, max_ring_radius, num_peri_rings_to_attempt
@@ -87,7 +93,9 @@ def get_generic_sampled_ring_indices(
             np.argsort(np.arctan2(ri_image[:, 0] - x_center, ri_image[:, 1] - y_center))
         ]
         ri_fov = ri_fov[
-            np.argsort(np.arctan2(ri_fov[:, 0] - foveated_im_dim // 2, ri_fov[:, 1] - foveated_im_dim // 2))
+            np.argsort(
+                np.arctan2(ri_fov[:, 0] - foveated_im_dim // 2, ri_fov[:, 1] - foveated_im_dim // 2)
+            )
         ]
 
         # sample according to sampling ratio
@@ -112,11 +120,25 @@ def get_generic_sampled_ring_indices(
         },
     )
 
-def get_gaussian_foveation_filter(image_dim: List[int], fovea_radius: int, image_out_dim: int, ring_sigma_scaling_factor=1): #ring_sigmas: List[float]):
-    """Sample image according to foveation params, sampling each peripheral point based on a Gaussian function
-    of its distance to other points in the image
-    Sampling is done via matrix-multiplication filtering
-    # """
+
+def get_default_gaussian_foveation_filter_params(
+    image_dim: List[int],
+    fovea_radius: int,
+    image_out_dim: int,
+    ring_sigma_scaling_factor=1,
+    device=None,
+):  # ring_sigmas: List[float]):
+    """Get default gaussian foveation filter params (mus and sigmas) for a given image size and fovea radius
+
+    Args:
+        image_dim: [height, width] of image
+        fovea_radius: radius of fovea in pixels
+        image_out_dim: output image dimension (must be even)
+        ring_sigma_scaling_factor: scaling factor for consequent ring sigmas (default: 1)
+
+    Returns:
+
+    """
     h, w = image_dim
 
     # assert all(0 <= xy_center[:, 0] < w), f"xy_center[0] must be in [0, {w}) (got: {xy_center[:, 0]})"
@@ -129,7 +151,7 @@ def get_gaussian_foveation_filter(image_dim: List[int], fovea_radius: int, image
     max_ring_radius = min(h, w) // 2
 
     generic_center_x, generic_center_y = w // 2, h // 2
-    foveation_params = get_generic_sampled_ring_indices(
+    generic_ring_specs = get_generic_sampled_ring_indices(
         x_extent=w,
         y_extent=h,
         x_center=generic_center_x,
@@ -139,56 +161,99 @@ def get_gaussian_foveation_filter(image_dim: List[int], fovea_radius: int, image
         num_peri_rings_to_attempt=num_peri_rings,
     )
 
-    fov_h, fov_w = foveation_params["foveated_image_size"]
+    fov_h, fov_w = generic_ring_specs["foveated_image_size"]
 
     ring_sigmas = [ring_sigma_scaling_factor * r for r in range(1, num_peri_rings + 1)]
-
-    # build filters
-    foveation_filters = np.zeros((fov_h, fov_w, h, w))
-
-    # fovea filters
-    foveation_filters[
-        foveation_params["mapped_indices"]["fovea"][:, 0],
-        foveation_params["mapped_indices"]["fovea"][:, 1],
-        foveation_params["source_indices"]["fovea"][:, 0],
-        foveation_params["source_indices"]["fovea"][:, 1],
-    ] = 1
 
     # z_fig, z_ax = plt.subplots(
     #     1, len(foveation_params["source_indices"]["peripheral_rings"]), figsize=(5, 5)
     # )
-    for i, ri in enumerate(foveation_params["source_indices"]["peripheral_rings"]):
-        # build gaussian
-        x = np.arange(0, w)
-        y = np.arange(0, h)
-        xx, yy = np.meshgrid(x, y, indexing="ij")
-        mu = ri
-        sigma = ring_sigmas[i]
+
+    gaussian_foveation_params = dict(
+        # image_dim=image_dim,
+        foveated_image_dim=(fov_h, fov_w),
+        fovea={
+            "mus": torch.tensor(generic_ring_specs["source_indices"]["fovea"], dtype=torch.float32, device=device),
+            "sigmas": torch.tensor(
+                [0] * len(generic_ring_specs["source_indices"]["fovea"]), dtype=torch.float32, device=device
+            ),
+            "target_indices": torch.tensor(
+                generic_ring_specs["mapped_indices"]["fovea"], dtype=torch.int, device=device
+            ),
+        },
+        peripheral_rings=[
+            {
+                "mus": torch.tensor(ri, dtype=torch.float32, device=device),
+                "sigmas": torch.tensor(sigmas, dtype=torch.float32, device=device),
+                "target_indices": torch.tensor(t, dtype=torch.int, device=device),
+            }
+            for ri, sigmas, t in zip(
+                generic_ring_specs["source_indices"]["peripheral_rings"],
+                ring_sigmas,
+                generic_ring_specs["mapped_indices"]["peripheral_rings"],
+            )
+        ],
+    )
+
+    return gaussian_foveation_params
+
+Z_EPS = 1e-2
+
+def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict, device=None):
+    """Sample image according to foveation params, sampling each peripheral point based on a Gaussian function
+    of its distance to other points in the image
+    Sampling is done via matrix-multiplication filtering
+    """
+
+    b, c, h, w = image.size()
+    fov_h, fov_w = foveation_params["foveated_image_dim"]
+
+    # build filters
+    foveation_filters = torch.zeros((fov_h, fov_w, h, w))
+
+    # # fovea filters
+    # foveation_filters[
+    #     generic_ring_specs["mapped_indices"]["fovea"][:, 0],
+    #     generic_ring_specs["mapped_indices"]["fovea"][:, 1],
+    #     generic_ring_specs["source_indices"]["fovea"][:, 0],
+    #     generic_ring_specs["source_indices"]["fovea"][:, 1],
+    # ] = 1
+
+    x = torch.arange(0, w)
+    y = torch.arange(0, h)
+    xx, yy = torch.meshgrid(x, y, indexing="ij")
+
+    for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
+        mu = ring["mus"]
+        sigma = ring["sigmas"]
+        target_indices = ring["target_indices"]
 
         # build gaussian
         # TODO: check formula
-        z = np.exp(
-            -((np.expand_dims(xx, -1) - mu[:, 0]) ** 2 + (np.expand_dims(yy, -1) - mu[:, 1]) ** 2)
-            / (2 * sigma**2)
+        # TODO: clip to relevant region only
+        z = torch.exp(
+            -((torch.unsqueeze(xx, -1).to(device) - mu[:, 0]) ** 2 + (torch.unsqueeze(yy, -1).to(device) - mu[:, 1]) ** 2)
+            / (2 * sigma**2 + Z_EPS)
         )
-        z = z / np.sum(z, axis=(0, 1))
+        z = z / torch.sum(z, axis=(0, 1))
         # z_img = z_ax[i].imshow(z.sum(axis=2))
         # z_fig.colorbar(z_img)
 
         foveation_filters[
-            foveation_params["mapped_indices"]["peripheral_rings"][i][:, 0],
-            foveation_params["mapped_indices"]["peripheral_rings"][i][:, 1],
-        ] = z.transpose(2, 0, 1)
+            target_indices[:, 0],
+            target_indices[:, 1],
+        ] = z.permute(2, 0, 1)
 
     # filter_fig, filter_ax = plt.subplots(1, 1, figsize=(5, 5))
     # g = filter_ax.imshow(foveation_filters.sum(axis=(0, 1)))
     # filter_fig.colorbar(g)
+    # plt.show()
     # apply filters
-    # _img = image.reshape((1 * c, h * w)).T
-    # _filters = foveation_filters.reshape((fov_h * fov_w, h * w))
-    # foveated_image = np.matmul(_filters, _img).reshape((fov_h, fov_w, c)).transpose(2, 0, 1)
+    _img = image.view((b * c, h * w)).T
+    _filters = foveation_filters.view((fov_h * fov_w, h * w))
+    foveated_image = torch.matmul(_filters, _img).view((fov_h, fov_w, b, c)).permute(2, 3, 0, 1)
 
-    return foveation_filters
+    return foveated_image
 
 
 # def sample_foveation_gaussian(image: torch.Tensor, xy_center: torch.Tensor, fovea_radius: int, image_out_dim: int, ring_sigmas: List[float]):
@@ -282,4 +347,3 @@ def get_gaussian_foveation_filter(image_dim: List[int], fovea_radius: int, image
 #     foveated_image = np.matmul(_filters, _img).reshape((fov_h, fov_w, c)).transpose(2, 0, 1)
 
 #     return foveated_image
-
