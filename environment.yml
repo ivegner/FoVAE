@@ -5,7 +5,7 @@ channels:
 dependencies:
     - python=3.9
     - pip>=19.0
-    - pytorch
+    - pytorch==2.0.0.dev20230228
     - torchvision
     - jupyter
     - numpy
@@ -15,4 +15,5 @@ dependencies:
     - tornado=6.1 # see above
     - pip:
       - "pytorch-lightning[extra]"
+      - tensorboard
 

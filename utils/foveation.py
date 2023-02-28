@@ -173,18 +173,22 @@ def get_default_gaussian_foveation_filter_params(
         # image_dim=image_dim,
         foveated_image_dim=(fov_h, fov_w),
         fovea={
-            "mus": torch.tensor(generic_ring_specs["source_indices"]["fovea"], dtype=torch.float32, device=device),
+            "mus": torch.tensor(
+                generic_ring_specs["source_indices"]["fovea"], dtype=torch.float32, device=device
+            ).unsqueeze(0),
             "sigmas": torch.tensor(
-                [0] * len(generic_ring_specs["source_indices"]["fovea"]), dtype=torch.float32, device=device
-            ),
+                [0] * len(generic_ring_specs["source_indices"]["fovea"]),
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(0),
             "target_indices": torch.tensor(
                 generic_ring_specs["mapped_indices"]["fovea"], dtype=torch.int, device=device
             ),
         },
         peripheral_rings=[
             {
-                "mus": torch.tensor(ri, dtype=torch.float32, device=device),
-                "sigmas": torch.tensor(sigmas, dtype=torch.float32, device=device),
+                "mus": torch.tensor(ri, dtype=torch.float32, device=device).unsqueeze(0),
+                "sigmas": torch.tensor(sigmas, dtype=torch.float32, device=device).unsqueeze(0),
                 "target_indices": torch.tensor(t, dtype=torch.int, device=device),
             }
             for ri, sigmas, t in zip(
@@ -197,9 +201,11 @@ def get_default_gaussian_foveation_filter_params(
 
     return gaussian_foveation_params
 
+
 Z_EPS = 1e-2
 
-def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict, device=None):
+
+def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
     """Sample image according to foveation params, sampling each peripheral point based on a Gaussian function
     of its distance to other points in the image
     Sampling is done via matrix-multiplication filtering
@@ -209,7 +215,7 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict, device
     fov_h, fov_w = foveation_params["foveated_image_dim"]
 
     # build filters
-    foveation_filters = torch.zeros((fov_h, fov_w, h, w))
+    foveation_filters = torch.zeros((b, fov_h, fov_w, h, w), device=image.device, dtype=image.dtype)
 
     # # fovea filters
     # foveation_filters[
@@ -219,39 +225,40 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict, device
     #     generic_ring_specs["source_indices"]["fovea"][:, 1],
     # ] = 1
 
-    x = torch.arange(0, w)
-    y = torch.arange(0, h)
+    x = torch.arange(0, w, device=image.device)
+    y = torch.arange(0, h, device=image.device)
     xx, yy = torch.meshgrid(x, y, indexing="ij")
 
+    # expand batch dim and ring_n dims
+    xx = xx.unsqueeze(0).unsqueeze(-1).to(torch.float)
+    yy = yy.unsqueeze(0).unsqueeze(-1).to(torch.float)
+
     for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
-        mu = ring["mus"]
+        mu = ring["mus"].unsqueeze(1).unsqueeze(1).to(torch.float) # unsqueeze to add h, w dims
         sigma = ring["sigmas"]
         target_indices = ring["target_indices"]
 
         # build gaussian
         # TODO: check formula
         # TODO: clip to relevant region only
-        z = torch.exp(
-            -((torch.unsqueeze(xx, -1).to(device) - mu[:, 0]) ** 2 + (torch.unsqueeze(yy, -1).to(device) - mu[:, 1]) ** 2)
-            / (2 * sigma**2 + Z_EPS)
-        )
-        z = z / torch.sum(z, axis=(0, 1))
+        z = torch.exp(-((xx - mu[:, :, :, :, 0]) ** 2 + (yy - mu[:, :, :, :, 1]) ** 2) / (2 * sigma**2 + Z_EPS))
+        z = z / torch.sum(z, axis=(1, 2), keepdim=True) # normalize
         # z_img = z_ax[i].imshow(z.sum(axis=2))
         # z_fig.colorbar(z_img)
 
-        foveation_filters[
+        foveation_filters[:,
             target_indices[:, 0],
             target_indices[:, 1],
-        ] = z.permute(2, 0, 1)
+        ] = z.permute(0, 3, 1, 2) # permute z to (b, ring_n, h, w)
 
     # filter_fig, filter_ax = plt.subplots(1, 1, figsize=(5, 5))
-    # g = filter_ax.imshow(foveation_filters.sum(axis=(0, 1)))
+    # g = filter_ax.imshow(foveation_filters[0].sum(axis=(0, 1)))
     # filter_fig.colorbar(g)
     # plt.show()
     # apply filters
-    _img = image.view((b * c, h * w)).T
-    _filters = foveation_filters.view((fov_h * fov_w, h * w))
-    foveated_image = torch.matmul(_filters, _img).view((fov_h, fov_w, b, c)).permute(2, 3, 0, 1)
+    _img = image.view((b, c, h * w)).transpose(1, 2)
+    _filters = foveation_filters.view((b, fov_h * fov_w, h * w))
+    foveated_image = torch.matmul(_filters, _img).view((b, fov_h, fov_w, c)).permute(0, 3, 1, 2)
 
     return foveated_image
 
