@@ -10,8 +10,18 @@ from copy import deepcopy
 
 import matplotlib.pyplot as plt
 
-from utils.visualization import imshow_unnorm
+from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters
 import utils.foveation as fov_utils
+
+def _recursive_to(x, *args, **kwargs):
+    if isinstance(x, torch.Tensor):
+        return x.to(*args, **kwargs)
+    elif isinstance(x, dict):
+        return {k: _recursive_to(v, *args, **kwargs) for k, v in x.items()}
+    elif isinstance(x, list):
+        return [_recursive_to(v, *args, **kwargs) for v in x]
+    else:
+        return x
 
 
 def reparam_sample(mu, logvar):
@@ -100,7 +110,7 @@ class FoVAE(pl.LightningModule):
         beta=1,
         # grad_clip=100,
         grad_skip_threshold=1000,
-        do_add_pos_encoding=True,
+        # do_add_pos_encoding=True,
         do_use_beta_norm=True,
     ):
         super().__init__()
@@ -111,10 +121,8 @@ class FoVAE(pl.LightningModule):
         self.z_dim = z_dim
 
         self.n_steps = n_steps
-        if do_add_pos_encoding:
-            self.num_channels = patch_channels + 2
-        else:
-            self.num_channels = patch_channels
+        # if do_add_pos_encoding:
+        self.num_channels = patch_channels + 2
         self.lr = lr
         self.foveation_padding = foveation_padding
         self.foveation_padding_mode = foveation_padding_mode
@@ -177,7 +185,7 @@ class FoVAE(pl.LightningModule):
 
         # self.grad_clip = grad_clip
         self.grad_skip_threshold = grad_skip_threshold
-        self.do_add_pos_encoding = do_add_pos_encoding
+        # self.do_add_pos_encoding = do_add_pos_encoding
         self.do_use_beta_norm = do_use_beta_norm
         if self.do_use_beta_norm:
             self.beta = (beta * z_dim) / input_dim  # according to beta-vae paper
@@ -214,27 +222,17 @@ class FoVAE(pl.LightningModule):
         # self.automatic_optimization = False
 
     def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)
-
-        def _recursive_to(x):
-            if isinstance(x, torch.Tensor):
-                return x.to(*args, **kwargs)
-            elif isinstance(x, dict):
-                return {k: _recursive_to(v) for k, v in x.items()}
-            elif isinstance(x, list):
-                return [_recursive_to(v) for v in x]
-            else:
-                return x
-
-        self.default_gaussian_filter_params = _recursive_to(self.default_gaussian_filter_params)
+        g = super().to(*args, **kwargs)
+        g.default_gaussian_filter_params = _recursive_to(self.default_gaussian_filter_params, *args, **kwargs)
+        return g
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         b, c, h, w = x.size()
 
-        if self.do_add_pos_encoding:
-            x_full = self._add_pos_encodings_to_img_batch(x)
-        else:
-            x_full = x
+        # if self.do_add_pos_encoding:
+        x_full = self._add_pos_encodings_to_img_batch(x)
+        # else:
+        #     x_full = x
 
         patch_loss, patch_rec_loss, patch_kl_div = (
             0.0,
@@ -415,22 +413,39 @@ class FoVAE(pl.LightningModule):
 
         # pad_h, pad_w = padded_image.shape[-2:]
 
-        # convert to (b, x, y) pixel index in the original image
-        loc = (loc + 1) / 2
-        loc = loc * torch.tensor([h, w], device=loc.device)
-        generic_center = torch.tensor([w // 2, h // 2], dtype=loc.dtype, device=loc.device)
-
-        # move gaussian foveation params centers to center at loc in the padded image
-        gaussian_filter_params = deepcopy(self.default_gaussian_filter_params)  # TODO: optimize
-        pad_offset = torch.tensor(pad_offset, dtype=loc.dtype, device=loc.device).unsqueeze(0)
-        for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
-            ring["mus"] = ring["mus"] + (loc - generic_center).unsqueeze(1) + pad_offset
+        # move the gaussian filter params to the loc
+        gaussian_filter_params = self._move_default_filter_params_to_loc(loc, (h, w), pad_offset)
 
         # foveate
         foveated_image = fov_utils.apply_gaussian_foveation(padded_image, gaussian_filter_params)
         if foveated_image.isnan().any():
             raise ValueError("NaNs in foveated image!")
         return foveated_image
+
+    def _move_default_filter_params_to_loc(self, loc: torch.Tensor, image_dim: Iterable, pad_offset: Optional[Iterable]=None):
+        """Move gaussian foveation params centers to center at loc in the padded image"""
+        assert len(image_dim) == 2, f"image_dim must be (h, w), got {image_dim}"
+        image_dim = torch.tensor(image_dim, dtype=loc.dtype, device=loc.device)
+
+        assert -1 <= loc.min() and loc.max() <= 1, f"loc must be in [-1, 1], got {loc.min()} to {loc.max()}"
+
+        if pad_offset is None:
+            pad_offset = [0, 0]
+        else:
+            assert len(pad_offset) == 2, f"pad_offset must be (h, w), got {pad_offset}"
+
+        # convert loc in [-1, 1] to (b, x, y) pixel index in the original image
+        loc = (loc + 1) / 2
+        loc = loc * image_dim
+
+        generic_center = image_dim// 2
+        pad_offset = torch.tensor(pad_offset, dtype=loc.dtype, device=loc.device).unsqueeze(0)
+
+        gaussian_filter_params = deepcopy(self.default_gaussian_filter_params)  # TODO: optimize
+        for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
+            ring["mus"] = ring["mus"] + (loc - generic_center).unsqueeze(1) + pad_offset
+
+        return gaussian_filter_params
 
     def _encode_patch(self, x: torch.Tensor):
         mus, logvars, zs = [None], [None], [x]
@@ -568,26 +583,61 @@ class FoVAE(pl.LightningModule):
         self.log("val_loss", loss)
         self.log("val_rec_loss", rec_loss)
         self.log("val_kl_div", kl_div)
+
         if batch_idx == 0:
+            N_TO_PLOT = 4
             tensorboard = self.logger.experiment
             # real = torchvision.utils.make_grid(x).cpu()
             # recon = torchvision.utils.make_grid(x_recon).cpu()
             # img = torch.concat((real, recon), dim=1)
 
-            # step constant bc real images don't change
             def remove_pos_channels_from_batch(g):
-                n_pos_channels = 2 if self.do_add_pos_encoding else 0
+                n_pos_channels = 2 # if self.do_add_pos_encoding else 0
                 return g[:, :-n_pos_channels, :, :]
 
-            # TODO: reconstruction of whole images or patches
+            real_images = x[:N_TO_PLOT].repeat(self.n_steps, 1, 1, 1, 1)
+            # plot stepwise foveations on real images
+            h, w = real_images.shape[3:]
+
+            # make figure with a column for each step and 3 rows: 1 for image with foveation, one for patch, one for patch reconstruction
+
+            figs = [plt.figure(figsize=(self.n_steps * 3, 10)) for _ in range(N_TO_PLOT)]
+            axs = [f.subplots(3, self.n_steps) for f in figs]
+
+            # plot foveations on images
+            for step, img_step_batch in enumerate(real_images):
+                positions = step_sample_zs[step][0].view(-1, self.num_channels, self.patch_dim, self.patch_dim)[:N_TO_PLOT, -2:].mean(dim=(2, 3))
+                gaussian_filter_params = _recursive_to(self._move_default_filter_params_to_loc(positions, (h, w), pad_offset=None), "cpu")
+                plot_gaussian_foveation_parameters(img_step_batch.cpu(), gaussian_filter_params, axs=[a[0][step] for a in axs], point_size=10)
+                for ax in [a[0][step] for a in axs]:
+                    ax.set_title(f"Foveation at step {step}", fontsize=8)
+
+            # plot patches
+            for step in range(self.n_steps):
+                patches = remove_pos_channels_from_batch(step_sample_zs[step][0][:N_TO_PLOT].view(-1, self.num_channels, self.patch_dim, self.patch_dim))
+                for i in range(N_TO_PLOT):
+                    imshow_unnorm(patches[i].cpu(), ax=axs[i][1][step])
+                    axs[i][1][step].set_title(f"Patch at step {step}", fontsize=8)
+
+            # plot patch reconstructions
+            for step in range(self.n_steps):
+                patches = remove_pos_channels_from_batch(step_z_recons[step][-1][:N_TO_PLOT].view(-1, self.num_channels, self.patch_dim, self.patch_dim))
+                for i in range(N_TO_PLOT):
+                    imshow_unnorm(patches[i].cpu(), ax=axs[i][2][step])
+                    axs[i][2][step].set_title(f"Patch reconstruction at step {step}", fontsize=8)
+
+            # add to tensorboard
+            for i, fig in enumerate(figs):
+                fig.tight_layout()
+                tensorboard.add_figure(f"Foveation Vis {i}", figs[i], global_step=self.global_step)
+
+            # step constant bc real images don't change
             tensorboard.add_images("Real Patches", remove_pos_channels_from_batch(step_sample_zs[0][0][:32].view(-1, self.num_channels, self.patch_dim, self.patch_dim)), global_step=0)
             tensorboard.add_images(
                 "Reconstructed Patches",
                 remove_pos_channels_from_batch(step_z_recons[0][-1][:32].view(-1, self.num_channels, self.patch_dim, self.patch_dim)),
                 global_step=self.global_step,
             )
-
-            # TODO: this traversal stuff makes no sense on sub-image patches!
 
             def stack_traversal_output(g):
                 # stack by interp image, then squeeze out the singular batch dimension and index out the 2 position channels
