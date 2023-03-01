@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 
 from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters
 import utils.foveation as fov_utils
+from modules.transformers import VisionTransformer
+
 
 def _recursive_to(x, *args, **kwargs):
     if isinstance(x, torch.Tensor):
@@ -132,6 +134,27 @@ class FoVAE(pl.LightningModule):
         self.encoders = nn.ModuleList([UpBlock(input_dim, z_dim)])  # , [1024, 256]),
         self.decoders = nn.ModuleList([DownBlock(z_dim, input_dim)])  # , [256, 1024]),
 
+        # for all levels except the highest-level next-patch-z predictor, the predictors are
+        # DownBlocks analogous to the decoders
+        # for highest-level next-patch-z predictor, the predictor is a Transformer conditioned on
+        # all past top-level Zs
+        # self.next_patch_predictors = nn.ModuleList([DownBlock(z_dim, input_dim)])
+        self.next_patch_predictors = nn.ModuleList(
+            [
+                VisionTransformer(
+                    input_dim=z_dim,
+                    output_dim=z_dim,
+                    embed_dim=256,
+                    hidden_dim=256,
+                    # num_channels=self.num_channels,
+                    num_heads=1,
+                    num_layers=1,
+                    dropout=0,
+                ),
+                DownBlock(z_dim, input_dim)
+            ]
+        )
+
         # self.encoder = nn.Sequential(
         #     View((-1, input_dim)),
         #     nn.GELU(),
@@ -196,19 +219,7 @@ class FoVAE(pl.LightningModule):
             self.beta = beta
 
         # image: (b, c, image_dim[0], image_dim[1])
-        # filters: (fov_h, fov_w, image_dim[0], image_dim[1])
         # TODO: sparsify
-        # self.register_buffer(
-        #     "foveation_filters",
-        #     torch.from_numpy(
-        #         get_gaussian_foveation_filter(
-        #             image_dim=(image_dim, image_dim),
-        #             fovea_radius=fovea_radius,
-        #             image_out_dim=patch_dim,
-        #             ring_sigma_scaling_factor=1.0,
-        #         ).astype(np.float32)
-        #     ),
-        # )
         self.default_gaussian_filter_params = (
             fov_utils.get_default_gaussian_foveation_filter_params(
                 image_dim=(image_dim, image_dim),
@@ -223,7 +234,9 @@ class FoVAE(pl.LightningModule):
 
     def to(self, *args, **kwargs):
         g = super().to(*args, **kwargs)
-        g.default_gaussian_filter_params = _recursive_to(self.default_gaussian_filter_params, *args, **kwargs)
+        g.default_gaussian_filter_params = _recursive_to(
+            self.default_gaussian_filter_params, *args, **kwargs
+        )
         return g
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
@@ -234,11 +247,17 @@ class FoVAE(pl.LightningModule):
         # else:
         #     x_full = x
 
-        patch_loss, patch_rec_loss, patch_kl_div = (
+        curr_patch_total_loss, curr_patch_rec_loss, curr_patch_kl_div = (
             0.0,
             0.0,
             0.0,
         )
+        next_patch_z_pred_total_loss = 0.0
+        # next_patch_total_loss, next_patch_rec_loss, next_patch_kl_div = (
+        #     0.0,
+        #     0.0,
+        #     0.0,
+        # )
 
         # patches: (b, patch_dim*patch_dim, c, h_out, w_out)
         # patch_locs_x = torch.linspace(-1, 1, 30)
@@ -247,32 +266,17 @@ class FoVAE(pl.LightningModule):
         # patch_vis = torchvision.utils.make_grid(patches, nrow=len(patch_locs_x), pad_value=1).cpu()
         # plt.imshow(patch_vis.permute(1, 2, 0) / 2 + 0.5)
 
-        # def get_next_patch_from_pos(pos: torch.Tensor):
-        #     # pos is a tensor of shape (b, 2)
-        #     # get (patch_dim, patch_dim) patch from x_full given by pos as center,
-        #     # where x and y are in [-1, 1]
-
-        #     # calculate l2 distances from pos to positions of all pixels in x_full
-        #     pos_l2_distances = torch.sqrt((x_full[:, -2:, :, :] - pos).pow(2).sum(dim=1))  # (b, h, w)
-        #     # find the (x, y) pixel index in x_full that has the lowest distance
-        #     min_distance_pos = pos_l2_distances.flatten(1, 2).argmin(dim=1)  # argmin over (b, h*w)
-        #     # convert to (b, x, y) pixel index
-        #     min_distance_pos = torch.stack(
-        #         (min_distance_pos // w, min_distance_pos % w), dim=-1
-        #     )
-        #     # get the patch from x_full
-        #     patch = x_full[:, :, min_distance_pos[:, 0] - self.patch_dim-1 , min_distance_pos[:, 1]]
-
-        def get_next_patch(curr_patch: torch.Tensor, curr_zs: torch.Tensor):
-            curr_pos = curr_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)[:, -2:, :, :].mean(dim=(2, 3))
-            # move pos in random direction a small amount
-            next_pos = curr_pos + torch.randn_like(curr_pos) * 0.1
-            # clamp to [-1, 1]
-            next_pos = torch.clamp(next_pos, -1, 1)
-            # get next patch
-
-            next_patch = get_patch_from_pos(next_pos)
-            return next_patch, next_pos
+        # def get_next_patch(curr_patch: torch.Tensor, curr_zs: torch.Tensor):
+        #     curr_pos = curr_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)[
+        #         :, -2:, :, :
+        #     ].mean(dim=(2, 3))
+        #     # move pos in random direction a small amount
+        #     next_pos = curr_pos + torch.randn_like(curr_pos) * 0.1
+        #     # clamp to [-1, 1]
+        #     next_pos = torch.clamp(next_pos, -1, 1)
+        #     # get next patch
+        #     next_patch = get_patch_from_pos(next_pos)
+        #     return next_patch, next_pos
 
         def get_patch_from_pos(pos):
             # TODO: investigate why reshape vs. view is needed
@@ -283,35 +287,57 @@ class FoVAE(pl.LightningModule):
         initial_positions = torch.tensor([0.0, 0.0], device=x.device).unsqueeze(0).repeat(b, 1)
         patches = [get_patch_from_pos(initial_positions)]
         sample_zs = []
+        pred_sample_zs = []
         z_mus = []
         z_logvars = []
         z_recons = []
         for step in range(self.n_steps):
-            # patch = x_full[:, :, : self.patch_dim, : self.patch_dim]
             curr_patch = patches[-1]
             curr_sample_zs, curr_z_mus, curr_z_logvars = self._encode_patch(curr_patch)
 
+            # if any previous predicted patch, calculate loss between current patch and previous predicted patch
+            if len(pred_sample_zs) > 0:
+                prev_pred_sample_zs = pred_sample_zs[-1]
+                for i in range(len(prev_pred_sample_zs)):
+                    next_patch_z_pred_total_loss += F.mse_loss(
+                        prev_pred_sample_zs[i], curr_sample_zs[i]
+                    )
+
+            # reconstruct current patch
             curr_z_recons = self._decode_patch(curr_sample_zs[-1])  # decode from top-level z
             curr_patch_recon = curr_z_recons[-1]
             assert torch.is_same_size(curr_patch_recon, curr_patch)
 
             # TODO: loss on all levels
-            loss, rec_loss, kl_div = self._loss(
+            _curr_patch_total_loss, _curr_patch_rec_loss, _curr_patch_kl_div = self._loss(
                 curr_patch, curr_patch_recon, curr_sample_zs[-1], curr_z_mus[-1], curr_z_logvars[-1]
             )
-            patch_loss += loss
-            patch_rec_loss += rec_loss
-            patch_kl_div += kl_div
+            curr_patch_total_loss += _curr_patch_total_loss
+            curr_patch_rec_loss += _curr_patch_rec_loss
+            curr_patch_kl_div += _curr_patch_kl_div
 
-            next_patch, next_pos = get_next_patch(curr_patch, curr_sample_zs)
-            patches.append(next_patch)
             sample_zs.append(curr_sample_zs)
             z_mus.append(curr_z_mus)
             z_logvars.append(curr_z_logvars)
             z_recons.append(curr_z_recons)
 
+            # predict zs for next patch
+            pred_next_zs = self._predict_next_patch_zs(sample_zs)
+            pred_sample_zs.append(pred_next_zs)
+            pred_next_patch = pred_next_zs[0] # analogous to curr_sample_zs[0]
+            pred_next_patch_pos = pred_next_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)[
+                :, -2:, :, :
+            ].mean(dim=(2, 3))
+            # clamp to [-1, 1]
+            pred_next_patch_pos = torch.clamp(pred_next_patch_pos, -1, 1)
+            # foveate to next position
+            next_patch = get_patch_from_pos(pred_next_patch_pos)
+
+            patches.append(next_patch)
+
+        total_loss = curr_patch_total_loss + next_patch_z_pred_total_loss
         return (
-            (patch_loss, patch_rec_loss, patch_kl_div),
+            (total_loss, curr_patch_total_loss, curr_patch_rec_loss, curr_patch_kl_div, next_patch_z_pred_total_loss),
             # sample_zs, zs, logvars, z_recons: list of length n_steps, each element is a list of length n_levels
             sample_zs,
             curr_z_mus,
@@ -422,12 +448,16 @@ class FoVAE(pl.LightningModule):
             raise ValueError("NaNs in foveated image!")
         return foveated_image
 
-    def _move_default_filter_params_to_loc(self, loc: torch.Tensor, image_dim: Iterable, pad_offset: Optional[Iterable]=None):
+    def _move_default_filter_params_to_loc(
+        self, loc: torch.Tensor, image_dim: Iterable, pad_offset: Optional[Iterable] = None
+    ):
         """Move gaussian foveation params centers to center at loc in the padded image"""
         assert len(image_dim) == 2, f"image_dim must be (h, w), got {image_dim}"
         image_dim = torch.tensor(image_dim, dtype=loc.dtype, device=loc.device)
 
-        assert -1 <= loc.min() and loc.max() <= 1, f"loc must be in [-1, 1], got {loc.min()} to {loc.max()}"
+        assert (
+            -1 <= loc.min() and loc.max() <= 1
+        ), f"loc must be in [-1, 1], got {loc.min()} to {loc.max()}"
 
         if pad_offset is None:
             pad_offset = [0, 0]
@@ -438,7 +468,7 @@ class FoVAE(pl.LightningModule):
         loc = (loc + 1) / 2
         loc = loc * image_dim
 
-        generic_center = image_dim// 2
+        generic_center = image_dim // 2
         pad_offset = torch.tensor(pad_offset, dtype=loc.dtype, device=loc.device).unsqueeze(0)
 
         gaussian_filter_params = deepcopy(self.default_gaussian_filter_params)  # TODO: optimize
@@ -475,6 +505,40 @@ class FoVAE(pl.LightningModule):
         # )
 
         return decodings
+
+    def _predict_next_patch_zs(self, prev_zs: torch.Tensor):
+        # prev_zs: list(n_steps_so_far) of lists (n_levels from lowest to highest) of tensors (b, dim)
+        # highest-level z is the last element of the list
+
+        # TODO: should these be sampled (i.e. predict + sample from mu+logvar) instead of predicted?
+        # I don't think so because trying to be analogous to the decoder, which doesn't sample
+
+        next_zs = []
+
+        N_LEVELS=2
+        for i, predictor in enumerate(self.next_patch_predictors):
+            z_level_to_predict = N_LEVELS - i - 1
+            if z_level_to_predict == N_LEVELS - 1:
+                # predict next highest-level z using special Transformer procedure
+                # concat all previous top-level zs
+                prev_top_zs = torch.stack([zs[-1] for zs in prev_zs], dim=0)
+                prev_top_zs = prev_top_zs.transpose(0, 1) # (b, n_steps, dim)
+                pred_z = self.next_patch_predictors[0](prev_top_zs)
+            else:
+                # predict next z using previous z
+
+                # TODO: condition on previous z of the same level?
+                # prev_same_level_z = prev_zs[-1][z_level_to_predict]
+                prev_higher_level_z = prev_zs[-1][z_level_to_predict + 1]
+                # TODO: condition on previous predicted z of higher level?
+                # prev_higher_level_pred_z = next_zs[0] # 0 because prepended
+
+                pred_z = predictor(prev_higher_level_z)
+
+            next_zs = [pred_z] + next_zs # prepend to match order of prev_zs
+
+        return next_zs
+
 
     def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
         b, c, h, w = x.size()
@@ -536,24 +600,28 @@ class FoVAE(pl.LightningModule):
                         interp_z[:, row] += val
                     else:
                         interp_z[:, row] = val
-                    sample = self._decode_patch(interp_z.to(self.device), z_level=z_level)[
-                        -1
-                    ].data.cpu().reshape(z.shape[0], self.num_channels, self.patch_dim, self.patch_dim)
+                    sample = (
+                        self._decode_patch(interp_z.to(self.device), z_level=z_level)[-1]
+                        .data.cpu()
+                        .reshape(z.shape[0], self.num_channels, self.patch_dim, self.patch_dim)
+                    )
                     row_samples.append(sample)
                 samples.append(row_samples)
         return samples
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        (loss, rec_loss, kl_div), step_x_zs, _, _, _ = self.forward(x, y)
-        self.log("train_loss", loss)
-        self.log("train_rec_loss", rec_loss, prog_bar=True)
-        self.log("train_kl_div", kl_div, prog_bar=True)
+        (total_loss, curr_patch_total_loss, curr_patch_rec_loss, curr_patch_kl_div, next_patch_z_pred_total_loss), step_sample_zs, _, _, _ = self.forward(x, y)
+        self.log("train_total_loss", total_loss)
+        self.log("train_curr_patch_total_loss", curr_patch_total_loss)
+        self.log("train_next_patch_zpred_total_loss", next_patch_z_pred_total_loss)
+        self.log("train_curr_patch_rec_loss", curr_patch_rec_loss, prog_bar=True)
+        self.log("train_curr_patch_kl_div", curr_patch_kl_div, prog_bar=True)
 
         # self._optimizer_step(loss)
-        skip_update = float(torch.isnan(loss))  # TODO: skip on grad norm
+        skip_update = float(torch.isnan(total_loss))  # TODO: skip on grad norm
         if skip_update:
-            print(f"Skipping update! {loss=}, {rec_loss=}, {kl_div=}")
+            print(f"Skipping update! {total_loss=}, {curr_patch_rec_loss=}, {curr_patch_kl_div=}, {next_patch_z_pred_total_loss=}")
 
         self.log(
             "n_skipped_steps",
@@ -566,11 +634,11 @@ class FoVAE(pl.LightningModule):
         )
         # self.log(grad_norm, skip_update, on_epoch=True, logger=True)
 
-        return None if skip_update else loss
+        return None if skip_update else total_loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        (loss, rec_loss, kl_div), step_sample_zs, _, _, step_z_recons = self.forward(x, y)
+        (total_loss, curr_patch_total_loss, curr_patch_rec_loss, curr_patch_kl_div, next_patch_z_pred_total_loss), step_sample_zs, _, _, step_z_recons = self.forward(x, y)
         # step_sample_zs: (n_steps, n_layers, batch_size, z_dim)
         # step_z_recons: (n_steps, n_layers, batch_size, z_dim)
         # last step_z_recons is the one used for reconstruction: step_z_recons[0, 0, -1].size()=n_channels*patch_dim*patch_dim
@@ -579,10 +647,16 @@ class FoVAE(pl.LightningModule):
             == step_sample_zs[0][0][0].size()
             == torch.Size([self.num_channels * self.patch_dim * self.patch_dim])
         )
-        assert step_sample_zs[0][1][0].size() == step_z_recons[0][0][-2].size() == torch.Size([self.z_dim])
-        self.log("val_loss", loss)
-        self.log("val_rec_loss", rec_loss)
-        self.log("val_kl_div", kl_div)
+        assert (
+            step_sample_zs[0][1][0].size()
+            == step_z_recons[0][0][-2].size()
+            == torch.Size([self.z_dim])
+        )
+        self.log("val_total_loss", total_loss)
+        self.log("val_curr_patch_total_loss", curr_patch_total_loss)
+        self.log("val_next_patch_zpred_total_loss", next_patch_z_pred_total_loss)
+        self.log("val_curr_patch_rec_loss", curr_patch_rec_loss)
+        self.log("val_curr_patch_kl_div", curr_patch_kl_div)
 
         if batch_idx == 0:
             N_TO_PLOT = 4
@@ -592,7 +666,7 @@ class FoVAE(pl.LightningModule):
             # img = torch.concat((real, recon), dim=1)
 
             def remove_pos_channels_from_batch(g):
-                n_pos_channels = 2 # if self.do_add_pos_encoding else 0
+                n_pos_channels = 2  # if self.do_add_pos_encoding else 0
                 return g[:, :-n_pos_channels, :, :]
 
             real_images = x[:N_TO_PLOT].repeat(self.n_steps, 1, 1, 1, 1)
@@ -606,22 +680,42 @@ class FoVAE(pl.LightningModule):
 
             # plot foveations on images
             for step, img_step_batch in enumerate(real_images):
-                positions = step_sample_zs[step][0].view(-1, self.num_channels, self.patch_dim, self.patch_dim)[:N_TO_PLOT, -2:].mean(dim=(2, 3))
-                gaussian_filter_params = _recursive_to(self._move_default_filter_params_to_loc(positions, (h, w), pad_offset=None), "cpu")
-                plot_gaussian_foveation_parameters(img_step_batch.cpu(), gaussian_filter_params, axs=[a[0][step] for a in axs], point_size=10)
+                positions = (
+                    step_sample_zs[step][0]
+                    .view(-1, self.num_channels, self.patch_dim, self.patch_dim)[:N_TO_PLOT, -2:]
+                    .mean(dim=(2, 3))
+                )
+                gaussian_filter_params = _recursive_to(
+                    self._move_default_filter_params_to_loc(positions, (h, w), pad_offset=None),
+                    "cpu",
+                )
+                plot_gaussian_foveation_parameters(
+                    img_step_batch.cpu(),
+                    gaussian_filter_params,
+                    axs=[a[0][step] for a in axs],
+                    point_size=10,
+                )
                 for ax in [a[0][step] for a in axs]:
                     ax.set_title(f"Foveation at step {step}", fontsize=8)
 
             # plot patches
             for step in range(self.n_steps):
-                patches = remove_pos_channels_from_batch(step_sample_zs[step][0][:N_TO_PLOT].view(-1, self.num_channels, self.patch_dim, self.patch_dim))
+                patches = remove_pos_channels_from_batch(
+                    step_sample_zs[step][0][:N_TO_PLOT].view(
+                        -1, self.num_channels, self.patch_dim, self.patch_dim
+                    )
+                )
                 for i in range(N_TO_PLOT):
                     imshow_unnorm(patches[i].cpu(), ax=axs[i][1][step])
                     axs[i][1][step].set_title(f"Patch at step {step}", fontsize=8)
 
             # plot patch reconstructions
             for step in range(self.n_steps):
-                patches = remove_pos_channels_from_batch(step_z_recons[step][-1][:N_TO_PLOT].view(-1, self.num_channels, self.patch_dim, self.patch_dim))
+                patches = remove_pos_channels_from_batch(
+                    step_z_recons[step][-1][:N_TO_PLOT].view(
+                        -1, self.num_channels, self.patch_dim, self.patch_dim
+                    )
+                )
                 for i in range(N_TO_PLOT):
                     imshow_unnorm(patches[i].cpu(), ax=axs[i][2][step])
                     axs[i][2][step].set_title(f"Patch reconstruction at step {step}", fontsize=8)
@@ -632,10 +726,22 @@ class FoVAE(pl.LightningModule):
                 tensorboard.add_figure(f"Foveation Vis {i}", figs[i], global_step=self.global_step)
 
             # step constant bc real images don't change
-            tensorboard.add_images("Real Patches", remove_pos_channels_from_batch(step_sample_zs[0][0][:32].view(-1, self.num_channels, self.patch_dim, self.patch_dim)), global_step=0)
+            tensorboard.add_images(
+                "Real Patches",
+                remove_pos_channels_from_batch(
+                    step_sample_zs[0][0][:32].view(
+                        -1, self.num_channels, self.patch_dim, self.patch_dim
+                    )
+                ),
+                global_step=0,
+            )
             tensorboard.add_images(
                 "Reconstructed Patches",
-                remove_pos_channels_from_batch(step_z_recons[0][-1][:32].view(-1, self.num_channels, self.patch_dim, self.patch_dim)),
+                remove_pos_channels_from_batch(
+                    step_z_recons[0][-1][:32].view(
+                        -1, self.num_channels, self.patch_dim, self.patch_dim
+                    )
+                ),
                 global_step=self.global_step,
             )
 
@@ -675,7 +781,7 @@ class FoVAE(pl.LightningModule):
                 global_step=self.global_step,
             )
 
-        return loss
+        return total_loss
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
