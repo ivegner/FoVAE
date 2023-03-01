@@ -104,6 +104,7 @@ class FoVAE(pl.LightningModule):
         fovea_radius=2,
         patch_dim=6,
         patch_channels=3,
+        # n_vae_levels=1,
         z_dim=10,
         n_steps: int = 1,
         foveation_padding: Union[Literal["max"], int] = 14,  # "max",
@@ -122,6 +123,8 @@ class FoVAE(pl.LightningModule):
         self.patch_dim = patch_dim
         self.z_dim = z_dim
 
+        # self.n_vae_levels = n_vae_levels
+
         self.n_steps = n_steps
         # if do_add_pos_encoding:
         self.num_channels = patch_channels + 2
@@ -138,7 +141,6 @@ class FoVAE(pl.LightningModule):
         # DownBlocks analogous to the decoders
         # for highest-level next-patch-z predictor, the predictor is a Transformer conditioned on
         # all past top-level Zs
-        # self.next_patch_predictors = nn.ModuleList([DownBlock(z_dim, input_dim)])
         self.next_patch_predictors = nn.ModuleList(
             [
                 VisionTransformer(
@@ -151,7 +153,7 @@ class FoVAE(pl.LightningModule):
                     num_layers=1,
                     dropout=0,
                 ),
-                DownBlock(z_dim, input_dim)
+                DownBlock(z_dim, input_dim),
             ]
         )
 
@@ -324,10 +326,10 @@ class FoVAE(pl.LightningModule):
             # predict zs for next patch
             pred_next_zs = self._predict_next_patch_zs(sample_zs)
             pred_sample_zs.append(pred_next_zs)
-            pred_next_patch = pred_next_zs[0] # analogous to curr_sample_zs[0]
-            pred_next_patch_pos = pred_next_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)[
-                :, -2:, :, :
-            ].mean(dim=(2, 3))
+            pred_next_patch = pred_next_zs[0]  # analogous to curr_sample_zs[0]
+            pred_next_patch_pos = pred_next_patch.view(
+                b, self.num_channels, self.patch_dim, self.patch_dim
+            )[:, -2:, :, :].mean(dim=(2, 3))
             # clamp to [-1, 1]
             pred_next_patch_pos = torch.clamp(pred_next_patch_pos, -1, 1)
             # foveate to next position
@@ -337,12 +339,19 @@ class FoVAE(pl.LightningModule):
 
         total_loss = curr_patch_total_loss + next_patch_z_pred_total_loss
         return (
-            (total_loss, curr_patch_total_loss, curr_patch_rec_loss, curr_patch_kl_div, next_patch_z_pred_total_loss),
-            # sample_zs, zs, logvars, z_recons: list of length n_steps, each element is a list of length n_levels
+            (
+                total_loss,
+                curr_patch_total_loss,
+                curr_patch_rec_loss,
+                curr_patch_kl_div,
+                next_patch_z_pred_total_loss,
+            ),
+            # sample_zs, zs, logvars, z_recons, pred_sample_zs: list of length n_steps, each element is a list of length n_levels
             sample_zs,
             curr_z_mus,
             curr_z_logvars,
             z_recons,
+            pred_sample_zs,
         )
 
     def _loss(
@@ -515,14 +524,14 @@ class FoVAE(pl.LightningModule):
 
         next_zs = []
 
-        N_LEVELS=2
+        N_LEVELS = 1 + 1
         for i, predictor in enumerate(self.next_patch_predictors):
             z_level_to_predict = N_LEVELS - i - 1
             if z_level_to_predict == N_LEVELS - 1:
                 # predict next highest-level z using special Transformer procedure
                 # concat all previous top-level zs
                 prev_top_zs = torch.stack([zs[-1] for zs in prev_zs], dim=0)
-                prev_top_zs = prev_top_zs.transpose(0, 1) # (b, n_steps, dim)
+                prev_top_zs = prev_top_zs.transpose(0, 1)  # (b, n_steps, dim)
                 pred_z = self.next_patch_predictors[0](prev_top_zs)
             else:
                 # predict next z using previous z
@@ -535,10 +544,9 @@ class FoVAE(pl.LightningModule):
 
                 pred_z = predictor(prev_higher_level_z)
 
-            next_zs = [pred_z] + next_zs # prepend to match order of prev_zs
+            next_zs = [pred_z] + next_zs  # prepend to match order of prev_zs
 
         return next_zs
-
 
     def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
         b, c, h, w = x.size()
@@ -611,7 +619,20 @@ class FoVAE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        (total_loss, curr_patch_total_loss, curr_patch_rec_loss, curr_patch_kl_div, next_patch_z_pred_total_loss), step_sample_zs, _, _, _ = self.forward(x, y)
+        (
+            (
+                total_loss,
+                curr_patch_total_loss,
+                curr_patch_rec_loss,
+                curr_patch_kl_div,
+                next_patch_z_pred_total_loss,
+            ),
+            step_sample_zs,
+            _,
+            _,
+            _,
+            _,
+        ) = self.forward(x, y)
         self.log("train_total_loss", total_loss)
         self.log("train_curr_patch_total_loss", curr_patch_total_loss)
         self.log("train_next_patch_zpred_total_loss", next_patch_z_pred_total_loss)
@@ -621,7 +642,9 @@ class FoVAE(pl.LightningModule):
         # self._optimizer_step(loss)
         skip_update = float(torch.isnan(total_loss))  # TODO: skip on grad norm
         if skip_update:
-            print(f"Skipping update! {total_loss=}, {curr_patch_rec_loss=}, {curr_patch_kl_div=}, {next_patch_z_pred_total_loss=}")
+            print(
+                f"Skipping update! {total_loss=}, {curr_patch_rec_loss=}, {curr_patch_kl_div=}, {next_patch_z_pred_total_loss=}"
+            )
 
         self.log(
             "n_skipped_steps",
@@ -638,7 +661,20 @@ class FoVAE(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        (total_loss, curr_patch_total_loss, curr_patch_rec_loss, curr_patch_kl_div, next_patch_z_pred_total_loss), step_sample_zs, _, _, step_z_recons = self.forward(x, y)
+        (
+            (
+                total_loss,
+                curr_patch_total_loss,
+                curr_patch_rec_loss,
+                curr_patch_kl_div,
+                next_patch_z_pred_total_loss,
+            ),
+            step_sample_zs,
+            _,
+            _,
+            step_z_recons,
+            step_next_z_preds,
+        ) = self.forward(x, y)
         # step_sample_zs: (n_steps, n_layers, batch_size, z_dim)
         # step_z_recons: (n_steps, n_layers, batch_size, z_dim)
         # last step_z_recons is the one used for reconstruction: step_z_recons[0, 0, -1].size()=n_channels*patch_dim*patch_dim
@@ -675,8 +711,8 @@ class FoVAE(pl.LightningModule):
 
             # make figure with a column for each step and 3 rows: 1 for image with foveation, one for patch, one for patch reconstruction
 
-            figs = [plt.figure(figsize=(self.n_steps * 3, 10)) for _ in range(N_TO_PLOT)]
-            axs = [f.subplots(3, self.n_steps) for f in figs]
+            figs = [plt.figure(figsize=(self.n_steps * 3, 12)) for _ in range(N_TO_PLOT)]
+            axs = [f.subplots(4, self.n_steps) for f in figs]
 
             # plot foveations on images
             for step, img_step_batch in enumerate(real_images):
@@ -719,6 +755,17 @@ class FoVAE(pl.LightningModule):
                 for i in range(N_TO_PLOT):
                     imshow_unnorm(patches[i].cpu(), ax=axs[i][2][step])
                     axs[i][2][step].set_title(f"Patch reconstruction at step {step}", fontsize=8)
+
+            # plot next patch predictions
+            for step in range(self.n_steps):
+                patches = remove_pos_channels_from_batch(
+                    step_next_z_preds[step][0][:N_TO_PLOT].view(
+                        -1, self.num_channels, self.patch_dim, self.patch_dim
+                    )
+                )
+                for i in range(N_TO_PLOT):
+                    imshow_unnorm(patches[i].cpu(), ax=axs[i][3][step])
+                    axs[i][3][step].set_title(f"Next patch predicted at step {step}", fontsize=8)
 
             # add to tensorboard
             for i, fig in enumerate(figs):

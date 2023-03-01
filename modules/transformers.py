@@ -32,6 +32,8 @@ class AttentionBlock(nn.Module):
         return x
 
 class VisionTransformer(nn.Module):
+    # adapted from https://pytorch-lightning.readthedocs.io/en/stable/notebooks/course_UvA-DL/11-vision-transformer.html
+    # based on ViT: https://arxiv.org/abs/2010.11929
     def __init__(
         self,
         input_dim,
