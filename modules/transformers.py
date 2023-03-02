@@ -80,19 +80,21 @@ class VisionTransformer(nn.Module):
         # Preprocess input
         B, T, dim = patches.shape
         assert dim == self.input_dim, f"Expected input dimension {self.input_dim}, got {dim}"
-        x = self.input_layer(patches)
+
+        # reshapes workaround for https://github.com/pytorch/pytorch/issues/95883
+        x = self.input_layer(patches.reshape(B * T, dim)).reshape(B, T, -1)
 
         # Add CLS token
         cls_token = self.cls_token.repeat(B, 1, 1)
         x = torch.cat([cls_token, x], dim=1)
-        # x = x + self.pos_embedding[:, : T + 1]
+        # # x = x + self.pos_embedding[:, : T + 1]
 
-        # Apply Transforrmer
+        # # Apply Transformer
         x = self.dropout(x)
         x = x.transpose(0, 1)
         x = self.transformer(x)
 
-        # Perform next-token prediction
+        # # Perform next-token prediction
         cls = x[0]
         out = self.next_token_predictor(cls)
 
