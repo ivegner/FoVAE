@@ -107,7 +107,7 @@ class FoVAE(pl.LightningModule):
         # n_vae_levels=1,
         z_dim=10,
         n_steps: int = 1,
-        foveation_padding: Union[Literal["max"], int] = 14,  # "max",
+        foveation_padding: Union[Literal["max"], int] = "max",
         foveation_padding_mode: Literal["zeros", "replicate"] = "zeros",
         lr=1e-3,
         beta=1,
@@ -334,6 +334,18 @@ class FoVAE(pl.LightningModule):
             pred_next_patch_pos = torch.clamp(pred_next_patch_pos, -1, 1)
             # foveate to next position
             next_patch = get_patch_from_pos(pred_next_patch_pos)
+            assert torch.is_same_size(next_patch, curr_patch)
+            # check that the next patch's position is close to the position from which
+            # it was supposed to be extracted
+            # position will wobble a little due to gaussian aggregation? TODO: investigate
+            # I don't care as long as it's under half a pixel
+            _next_patch_center = next_patch.view(
+                b, self.num_channels, self.patch_dim, self.patch_dim
+            )[:, -2:, :, :].mean(dim=(2, 3))
+            assert (_next_patch_center - pred_next_patch_pos).abs().max() <= 0.5, (
+                f"Next patch position {_next_patch_center.round(2).cpu()} is too far from predicted position {pred_next_patch_pos.round(2).cpu()}: "
+                f"{(_next_patch_center - pred_next_patch_pos).abs().max()} > 0.5"
+            )
 
             patches.append(next_patch)
 
@@ -423,10 +435,10 @@ class FoVAE(pl.LightningModule):
 
         pad_offset = [0, 0]
         if self.foveation_padding == "max":
-            pad_offset = [h, w]
+            pad_offset = np.ceil([h / 2, w / 2]).astype(int).tolist()
             padded_image = F.pad(
                 image,
-                (h, h, w, w),
+                (pad_offset[0], pad_offset[0], pad_offset[1], pad_offset[1]),
                 mode=padding_mode,
                 value=pad_value,
             )
@@ -477,12 +489,16 @@ class FoVAE(pl.LightningModule):
         loc = (loc + 1) / 2
         loc = loc * image_dim
 
-        generic_center = image_dim // 2
+        generic_center = image_dim / 2
         pad_offset = torch.tensor(pad_offset, dtype=loc.dtype, device=loc.device).unsqueeze(0)
 
         gaussian_filter_params = deepcopy(self.default_gaussian_filter_params)  # TODO: optimize
         for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
-            ring["mus"] = ring["mus"] + (loc - generic_center).unsqueeze(1) + pad_offset
+            new_mus = ring["mus"] + (loc - generic_center).unsqueeze(1)
+            assert torch.isclose(
+                new_mus.mean(1), loc
+            ).all(), f"New gaussian centers after move not close to loc: e.g. {new_mus.mean(1)[0]} vs {loc[0]}"
+            ring["mus"] = new_mus + pad_offset
 
         return gaussian_filter_params
 
@@ -758,14 +774,30 @@ class FoVAE(pl.LightningModule):
 
             # plot next patch predictions
             for step in range(self.n_steps):
-                patches = remove_pos_channels_from_batch(
-                    step_next_z_preds[step][0][:N_TO_PLOT].view(
-                        -1, self.num_channels, self.patch_dim, self.patch_dim
-                    )
+                pred_patches = step_next_z_preds[step][0][:N_TO_PLOT].view(
+                    -1, self.num_channels, self.patch_dim, self.patch_dim
                 )
+                pred_pos = (pred_patches[:, -2:].mean(dim=(2, 3)) / 2 + 0.5).cpu() * torch.tensor(
+                    [h, w]
+                )
+                pred_patches = remove_pos_channels_from_batch(pred_patches)
                 for i in range(N_TO_PLOT):
-                    imshow_unnorm(patches[i].cpu(), ax=axs[i][3][step])
-                    axs[i][3][step].set_title(f"Next patch predicted at step {step}", fontsize=8)
+                    ax = axs[i][3][step]
+                    imshow_unnorm(patches[i].cpu(), ax=ax)
+                    ax.set_title(
+                        f"Next patch pred. at step {step} - ({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
+                        fontsize=8,
+                    )
+                    # ax.text(
+                    #     -0.05,
+                    #     -0.05,
+                    #     f"(pred: {pred_pos[i][0]:.2f}, {pred_pos[i][1]:.2f})",
+                    #     color="white",
+                    #     fontsize=8,
+                    #     bbox=dict(facecolor="black", alpha=0.5),
+                    #     horizontalalignment="left",
+                    #     verticalalignment="top",
+                    # )
 
             # add to tensorboard
             for i, fig in enumerate(figs):

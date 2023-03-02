@@ -173,9 +173,10 @@ def get_default_gaussian_foveation_filter_params(
         # image_dim=image_dim,
         foveated_image_dim=(fov_h, fov_w),
         fovea={
+            # add 0.5 to indices to get center of pixel
             "mus": torch.tensor(
                 generic_ring_specs["source_indices"]["fovea"], dtype=torch.float32, device=device
-            ).unsqueeze(0),
+            ).unsqueeze(0) + 0.5,
             "sigmas": torch.tensor(
                 [0] * len(generic_ring_specs["source_indices"]["fovea"]),
                 dtype=torch.float32,
@@ -187,7 +188,8 @@ def get_default_gaussian_foveation_filter_params(
         },
         peripheral_rings=[
             {
-                "mus": torch.tensor(ri, dtype=torch.float32, device=device).unsqueeze(0),
+                # add 0.5 to indices to get center of pixel
+                "mus": torch.tensor(ri, dtype=torch.float32, device=device).unsqueeze(0) + 0.5,
                 "sigmas": torch.tensor(sigmas, dtype=torch.float32, device=device).unsqueeze(0),
                 "target_indices": torch.tensor(t, dtype=torch.int, device=device),
             }
@@ -230,8 +232,9 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
     xx, yy = torch.meshgrid(x, y, indexing="ij")
 
     # expand batch dim and ring_n dims
-    xx = xx.unsqueeze(0).unsqueeze(-1).to(torch.float)
-    yy = yy.unsqueeze(0).unsqueeze(-1).to(torch.float)
+    # add 0.5 to get from indices to centers of pixels
+    xx = xx.unsqueeze(0).unsqueeze(-1).to(torch.float) + 0.5
+    yy = yy.unsqueeze(0).unsqueeze(-1).to(torch.float) + 0.5
 
     for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
         mu = ring["mus"].unsqueeze(1).unsqueeze(1).to(torch.float) # unsqueeze to add h, w dims

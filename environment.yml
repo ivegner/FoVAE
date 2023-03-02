@@ -16,4 +16,5 @@ dependencies:
     - pip:
       - "pytorch-lightning[extra]"
       - tensorboard
+      - black
 

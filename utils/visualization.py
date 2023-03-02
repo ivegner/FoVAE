@@ -8,9 +8,9 @@ def imshow_unnorm(img: torch.Tensor, ax=None):
     img = img / 2 + 0.5
     npimg = np.transpose(img.numpy(), (1, 2, 0))
     if ax:
-        ax.imshow(npimg)
+        ax.imshow(npimg, extent=(0, npimg.shape[0], npimg.shape[1], 0))
     else:
-        plt.imshow(npimg)
+        plt.imshow(npimg, extent=(0, npimg.shape[0], npimg.shape[1], 0))
         plt.show()
 
 
