@@ -387,6 +387,13 @@ class FoVAE(pl.LightningModule):
         # TODO: reconstruct whole image
         # TODO: there's a memory leak somewhere, comes out during overfit_batches=1
 
+
+        curr_patch_total_loss /= self.n_steps
+        curr_patch_rec_total_loss /= self.n_steps
+        curr_patch_total_kl_div /= self.n_steps
+        next_patch_z_pred_total_loss /= self.n_steps
+        next_patch_pos_kl_div /= self.n_steps
+
         total_loss = curr_patch_total_loss + next_patch_z_pred_total_loss + next_patch_pos_kl_div
         return dict(
             losses = dict(
