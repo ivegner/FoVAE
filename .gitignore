@@ -2,7 +2,8 @@
 data/
 lightning_logs/
 
-test_bug.py
+_snippets.py
+**/*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

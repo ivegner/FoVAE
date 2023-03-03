@@ -15,7 +15,7 @@ class AttentionBlock(nn.Module):
         super().__init__()
 
         self.layer_norm_1 = nn.LayerNorm(embed_dim)
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads)
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.layer_norm_2 = nn.LayerNorm(embed_dim)
         self.linear = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
@@ -91,11 +91,11 @@ class VisionTransformer(nn.Module):
 
         # # Apply Transformer
         x = self.dropout(x)
-        x = x.transpose(0, 1)
+        # x = x.transpose(0, 1)
         x = self.transformer(x)
 
         # # Perform next-token prediction
-        cls = x[0]
+        cls = x[:, 0]
         out = self.next_token_predictor(cls)
 
         return out

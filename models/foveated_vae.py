@@ -11,6 +11,7 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 
 from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters
+from utils.vae_utils import gaussian_likelihood, gaussian_kl_divergence
 import utils.foveation as fov_utils
 from modules.transformers import VisionTransformer
 
@@ -108,12 +109,13 @@ class FoVAE(pl.LightningModule):
         z_dim=10,
         n_steps: int = 1,
         foveation_padding: Union[Literal["max"], int] = "max",
-        foveation_padding_mode: Literal["zeros", "replicate"] = "zeros",
+        foveation_padding_mode: Literal["zeros", "replicate"] = "replicate",
         lr=1e-3,
         beta=1,
         # grad_clip=100,
         grad_skip_threshold=1000,
         # do_add_pos_encoding=True,
+        do_z_pred_cond_from_top=True,
         do_use_beta_norm=True,
     ):
         super().__init__()
@@ -144,17 +146,27 @@ class FoVAE(pl.LightningModule):
         self.next_patch_predictors = nn.ModuleList(
             [
                 VisionTransformer(
-                    input_dim=z_dim,
+                    input_dim=z_dim + 2, # 2 for concatenated next position
                     output_dim=z_dim,
-                    embed_dim=256,
-                    hidden_dim=256,
-                    # num_channels=self.num_channels,
-                    num_heads=1,
-                    num_layers=1,
+                    embed_dim=32,  # TODO
+                    hidden_dim=64,  # TODO
+                    num_heads=1,  # TODO
+                    num_layers=1,  # TODO
                     dropout=0,
                 ),
-                DownBlock(z_dim, input_dim),
+                DownBlock(z_dim * 2 if do_z_pred_cond_from_top else z_dim, input_dim),
             ]
+        )
+
+        # TODO
+        self.next_location_predictor = VisionTransformer(
+            input_dim=z_dim,
+            output_dim=2 * 2,
+            embed_dim=32,  # TODO
+            hidden_dim=64,  # TODO
+            num_heads=1,  # TODO
+            num_layers=1,  # TODO
+            dropout=0,
         )
 
         # self.encoder = nn.Sequential(
@@ -209,8 +221,10 @@ class FoVAE(pl.LightningModule):
         #         kaiming_init(m)
 
         # self.grad_clip = grad_clip
+
         self.grad_skip_threshold = grad_skip_threshold
         # self.do_add_pos_encoding = do_add_pos_encoding
+        self.do_z_pred_cond_from_top = do_z_pred_cond_from_top
         self.do_use_beta_norm = do_use_beta_norm
         if self.do_use_beta_norm:
             self.beta = (beta * z_dim) / input_dim  # according to beta-vae paper
@@ -249,12 +263,13 @@ class FoVAE(pl.LightningModule):
         # else:
         #     x_full = x
 
-        curr_patch_total_loss, curr_patch_rec_loss, curr_patch_kl_div = (
+        curr_patch_total_loss, curr_patch_rec_total_loss, curr_patch_total_kl_div = (
             0.0,
             0.0,
             0.0,
         )
         next_patch_z_pred_total_loss = 0.0
+        next_patch_pos_kl_div = 0.0
         # next_patch_total_loss, next_patch_rec_loss, next_patch_kl_div = (
         #     0.0,
         #     0.0,
@@ -293,6 +308,7 @@ class FoVAE(pl.LightningModule):
         z_mus = []
         z_logvars = []
         z_recons = []
+        patch_positions = [initial_positions]
         for step in range(self.n_steps):
             curr_patch = patches[-1]
             curr_sample_zs, curr_z_mus, curr_z_logvars = self._encode_patch(curr_patch)
@@ -312,19 +328,26 @@ class FoVAE(pl.LightningModule):
 
             # TODO: loss on all levels
             _curr_patch_total_loss, _curr_patch_rec_loss, _curr_patch_kl_div = self._loss(
-                curr_patch, curr_patch_recon, curr_sample_zs[-1], curr_z_mus[-1], curr_z_logvars[-1]
+                curr_patch, curr_patch_recon, curr_z_mus[-1], curr_z_logvars[-1]
             )
             curr_patch_total_loss += _curr_patch_total_loss
-            curr_patch_rec_loss += _curr_patch_rec_loss
-            curr_patch_kl_div += _curr_patch_kl_div
+            curr_patch_rec_total_loss += _curr_patch_rec_loss
+            curr_patch_total_kl_div += _curr_patch_kl_div
 
             sample_zs.append(curr_sample_zs)
             z_mus.append(curr_z_mus)
             z_logvars.append(curr_z_logvars)
             z_recons.append(curr_z_recons)
 
+            next_patch_sample_pos, next_patch_pos_mus, next_patch_pos_logvars = self._predict_next_patch_loc(sample_zs)
+            # calculate kl divergence between predicted next patch pos and std-normal prior
+            # only do kl divergence because reconstruction of next_pos is captured in next_patch_rec_loss
+            _, _, _next_patch_pos_kl_div = self._loss(mu=next_patch_pos_mus, logvar=next_patch_pos_logvars)
+            next_patch_pos_kl_div += _next_patch_pos_kl_div
+            patch_positions.append(next_patch_sample_pos)
+
             # predict zs for next patch
-            pred_next_zs = self._predict_next_patch_zs(sample_zs)
+            pred_next_zs = self._predict_next_patch_zs(sample_zs, next_patch_sample_pos)
             pred_sample_zs.append(pred_next_zs)
             pred_next_patch = pred_next_zs[0]  # analogous to curr_sample_zs[0]
             pred_next_patch_pos = pred_next_patch.view(
@@ -332,89 +355,111 @@ class FoVAE(pl.LightningModule):
             )[:, -2:, :, :].mean(dim=(2, 3))
             # clamp to [-1, 1]
             pred_next_patch_pos = torch.clamp(pred_next_patch_pos, -1, 1)
+
             # foveate to next position
-            next_patch = get_patch_from_pos(pred_next_patch_pos)
+            next_patch = get_patch_from_pos(next_patch_sample_pos)
             assert torch.is_same_size(next_patch, curr_patch)
+
             # check that the next patch's position is close to the position from which
             # it was supposed to be extracted
             # position will wobble a little due to gaussian aggregation? TODO: investigate
             # I don't care as long as it's under half a pixel
-            _next_patch_center = next_patch.view(
-                b, self.num_channels, self.patch_dim, self.patch_dim
-            )[:, -2:, :, :].mean(dim=(2, 3))
-            assert (_next_patch_center - pred_next_patch_pos).abs().max() <= 0.5, (
-                f"Next patch position {_next_patch_center.round(2).cpu()} is too far from predicted position {pred_next_patch_pos.round(2).cpu()}: "
-                f"{(_next_patch_center - pred_next_patch_pos).abs().max()} > 0.5"
-            )
+
+            # this is commented because we do not allow foveation outside the image, and
+            # depending on method of padding, locations in the padding area will not have true locations, but
+            # will be clamped to locations at the edge of the image (or zeros). As such, averaging the locations on the patch
+            # has to be inside the image, but the location would encompass locations outside the image.
+            # this is a useful check though, and should be re-enabled if the foveation method is changed to not rely on
+            # padding and/or clamping
+            # _next_patch_center = next_patch.view(
+            #     b, self.num_channels, self.patch_dim, self.patch_dim
+            # )[:, -2:, :, :].mean(dim=(2, 3))
+            # _acceptable_dist_threshold = 0.5 / min(h, w)
+            # assert (
+            #     _next_patch_center - next_patch_sample_pos
+            # ).abs().max() <= _acceptable_dist_threshold, (
+            #     f"Next patch position {_next_patch_center.round(2).cpu()} is too far from predicted position {next_patch_sample_pos.round(2).cpu()}: "
+            #     f"{(_next_patch_center - next_patch_sample_pos).abs().max()} > {_acceptable_dist_threshold}"
+            # )
 
             patches.append(next_patch)
 
-        total_loss = curr_patch_total_loss + next_patch_z_pred_total_loss
-        return (
-            (
-                total_loss,
-                curr_patch_total_loss,
-                curr_patch_rec_loss,
-                curr_patch_kl_div,
-                next_patch_z_pred_total_loss,
+        # TODO: reconstruct whole image
+        # TODO: there's a memory leak somewhere, comes out during overfit_batches=1
+
+        total_loss = curr_patch_total_loss + next_patch_z_pred_total_loss + next_patch_pos_kl_div
+        return dict(
+            losses = dict(
+                total_loss = total_loss,
+                curr_patch_total_loss = curr_patch_total_loss,
+                curr_patch_rec_loss = curr_patch_rec_total_loss,
+                curr_patch_kl_div = curr_patch_total_kl_div,
+                next_patch_z_pred_total_loss = next_patch_z_pred_total_loss,
+                next_patch_pos_kl_div = next_patch_pos_kl_div
             ),
-            # sample_zs, zs, logvars, z_recons, pred_sample_zs: list of length n_steps, each element is a list of length n_levels
-            sample_zs,
-            curr_z_mus,
-            curr_z_logvars,
-            z_recons,
-            pred_sample_zs,
+            step_vars=dict(
+                # all except last are a list of length n_steps, each element is a list of length n_levels
+                sample_zs=sample_zs,
+                curr_z_mus=curr_z_mus,
+                curr_z_logvars=curr_z_logvars,
+                z_recons=z_recons,
+                pred_sample_zs=pred_sample_zs,
+                patch_positions=patch_positions, # list of length n_steps, each element is a tensor of shape (b, 2)
+            )
         )
 
     def _loss(
         self,
-        x: torch.Tensor,
-        x_recon: torch.Tensor,
-        z: torch.Tensor,
-        mu: torch.Tensor,
-        logvar: torch.Tensor,
+        x: Optional[torch.Tensor] = None,
+        x_recon: Optional[torch.Tensor] = None,
+        # z: Optional[torch.Tensor] = None,
+        mu: Optional[torch.Tensor] = None,
+        logvar: Optional[torch.Tensor] = None,
     ):
-        def gaussian_likelihood(x, x_hat, logscale):
-            # scale = torch.exp(torch.ones_like(x_hat) * logscale)
-            mean = x_hat
-            dist = torch.distributions.Normal(mean, 1.0)
+        """
+        Calculate Gaussian likelihood + KL divergence for an arbitrary input.
+        If x and x_recon are provided, Gaussian likelihood loss is calculated.
+        If mu and logvar are provided, KL divergence loss from standard-normal prior is calculated.
+        If both are provided, both losses are calculated and summed weighted by self.beta.
 
-            # measure prob of seeing image under p(x|z)
-            log_pxz = dist.log_prob(x)
-            return log_pxz.sum(dim=1)
+        Args:
+            x: input
+            x_recon: reconstruction of input
+            mu: latent mean
+            logvar: latent log variance
 
-        def kl_divergence(z, mu, std):
-            # --------------------------
-            # Monte carlo KL divergence
-            # --------------------------
-            # 1. define the first two probabilities (in this case Normal for both)
-            p = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(std))
-            q = torch.distributions.Normal(mu, std)
+        Returns:
+            loss: beta-weighted sum of Gaussian likelihood and KL divergence losses, if both are calculated
+            recon_loss: Gaussian likelihood loss, if calculated
+            kl: KL divergence loss, if calculated
+        """
+        recon_loss, kl = None, None
 
-            # # 2. get the probabilities from the equation
-            # # log(q(z|x)) - log(p(z))
-            # log_qzx = q.log_prob(z)
-            # log_pz = p.log_prob(z)
-            # kl = (log_qzx - log_pz)
-            kl = torch.distributions.kl_divergence(q, p)
-            kl = kl.sum(-1)
-            return kl
+        if (x is None and x_recon is None) and (mu is None and logvar is None):
+            raise ValueError("Must provide either x and x_recon (for likelihood loss) or mu and logvar (for KL divergence loss)")
 
-        std = torch.exp(logvar / 2)
+        if (x is not None and x_recon is None) or (x is None and x_recon is not None):
+            raise ValueError("Must provide both x and x_recon for likelihood loss")
+        else:
+            try:
+                # can error due to bad predictions
+                recon_loss = -gaussian_likelihood(x, x_recon, 0.0).mean()
+            except ValueError as e:
+                recon_loss = torch.nan
 
-        try:
-            # can error due to bad predictions
-            recon_loss = -gaussian_likelihood(x, x_recon, 0.0).mean()
-        except ValueError as e:
-            recon_loss = torch.nan
+        if (mu is not None and logvar is None) or (mu is None and logvar is not None):
+            raise ValueError("Must provide both mu and logvar for KL divergence loss")
+        else:
+            try:
+                std = torch.exp(logvar / 2)
+                kl = gaussian_kl_divergence(mu, std).mean()
+            except ValueError as e:
+                kl = torch.nan
 
-        try:
-            kl = kl_divergence(z, mu, std).mean()
-        except ValueError as e:
-            kl = torch.nan
+        total_loss = (self.beta * kl + recon_loss) if recon_loss is not None and kl is not None else None
 
         # maximize reconstruction likelihood (minimize its negative), minimize kl divergence
-        return (self.beta * kl + recon_loss), recon_loss, kl
+        return total_loss, recon_loss, kl
 
     def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor):
         # image: (b, c, h, w)
@@ -496,7 +541,7 @@ class FoVAE(pl.LightningModule):
         for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
             new_mus = ring["mus"] + (loc - generic_center).unsqueeze(1)
             assert torch.isclose(
-                new_mus.mean(1), loc
+                new_mus.mean(1), loc, atol=1e-6
             ).all(), f"New gaussian centers after move not close to loc: e.g. {new_mus.mean(1)[0]} vs {loc[0]}"
             ring["mus"] = new_mus + pad_offset
 
@@ -531,8 +576,23 @@ class FoVAE(pl.LightningModule):
 
         return decodings
 
-    def _predict_next_patch_zs(self, prev_zs: torch.Tensor):
+    def _predict_next_patch_loc(self, prev_zs: List[List[torch.Tensor]]):
         # prev_zs: list(n_steps_so_far) of lists (n_levels from lowest to highest) of tensors (b, dim)
+        # highest-level z is the last element of the list
+
+        Z_LEVEL_TO_PRED_LOC = -1 # TODO: make this a param, and maybe multiple levels
+
+        prev_top_zs = torch.stack([zs[Z_LEVEL_TO_PRED_LOC] for zs in prev_zs], dim=0)
+        prev_top_zs = prev_top_zs.transpose(0, 1)  # (b, n_steps, dim)
+        pred = self.next_location_predictor(prev_top_zs)
+        next_loc_mu, next_loc_logvar = pred[:, :2], pred[:, 2:]
+        next_loc = reparam_sample(next_loc_mu, next_loc_logvar)
+
+        return torch.clamp(next_loc, -1, 1) , next_loc_mu, next_loc_logvar
+
+    def _predict_next_patch_zs(self, prev_zs: List[List[torch.Tensor]], next_patch_pos: torch.Tensor):
+        # prev_zs: list(n_steps_so_far) of lists (n_levels from lowest to highest) of tensors (b, dim)
+        # next_patch_pos: Tensor (b, 2)
         # highest-level z is the last element of the list
 
         # TODO: should these be sampled (i.e. predict + sample from mu+logvar) instead of predicted?
@@ -546,19 +606,32 @@ class FoVAE(pl.LightningModule):
             if z_level_to_predict == N_LEVELS - 1:
                 # predict next highest-level z using special Transformer procedure
                 # concat all previous top-level zs
+
+                # # add next patch pos as extra token
+                # # TODO: maybe add concatenate it to all tokens instead?
+                # pos_as_token = torch.zeros_like(prev_zs[0][-1])
+                # pos_as_token[:, :2] = next_patch_pos
+
                 prev_top_zs = torch.stack([zs[-1] for zs in prev_zs], dim=0)
                 prev_top_zs = prev_top_zs.transpose(0, 1)  # (b, n_steps, dim)
-                pred_z = self.next_patch_predictors[0](prev_top_zs)
+
+                # concatenate next patch pos to each z, TODO: maybe add as extra token instead?
+                prev_top_zs_with_pos = torch.cat((prev_top_zs, next_patch_pos.unsqueeze(1).repeat(1, prev_top_zs.size(1), 1)), dim=2)
+
+                pred_z = self.next_patch_predictors[0](prev_top_zs_with_pos)
             else:
                 # predict next z using previous z
 
                 # TODO: condition on previous z of the same level?
                 # prev_same_level_z = prev_zs[-1][z_level_to_predict]
                 prev_higher_level_z = prev_zs[-1][z_level_to_predict + 1]
-                # TODO: condition on previous predicted z of higher level?
-                # prev_higher_level_pred_z = next_zs[0] # 0 because prepended
+                x = prev_higher_level_z
+                # ondition on current predicted z of higher level?
+                if self.do_z_pred_cond_from_top:
+                    curr_higher_level_pred_z = next_zs[0]  # 0 because prepended
+                    x = torch.cat((x, curr_higher_level_pred_z), dim=1)
 
-                pred_z = predictor(prev_higher_level_z)
+                pred_z = predictor(x)
 
             next_zs = [pred_z] + next_zs  # prepend to match order of prev_zs
 
@@ -635,25 +708,20 @@ class FoVAE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        (
-            (
-                total_loss,
-                curr_patch_total_loss,
-                curr_patch_rec_loss,
-                curr_patch_kl_div,
-                next_patch_z_pred_total_loss,
-            ),
-            step_sample_zs,
-            _,
-            _,
-            _,
-            _,
-        ) = self.forward(x, y)
+        forward_out = self.forward(x, y)
+        total_loss = forward_out["losses"]["total_loss"]
+        curr_patch_total_loss = forward_out["losses"]["curr_patch_total_loss"]
+        curr_patch_rec_loss = forward_out["losses"]["curr_patch_rec_loss"]
+        curr_patch_kl_div = forward_out["losses"]["curr_patch_kl_div"]
+        next_patch_z_pred_total_loss = forward_out["losses"]["next_patch_z_pred_total_loss"]
+        next_patch_pos_kl_div = forward_out["losses"]["next_patch_pos_kl_div"]
+
         self.log("train_total_loss", total_loss)
         self.log("train_curr_patch_total_loss", curr_patch_total_loss)
         self.log("train_next_patch_zpred_total_loss", next_patch_z_pred_total_loss)
         self.log("train_curr_patch_rec_loss", curr_patch_rec_loss, prog_bar=True)
         self.log("train_curr_patch_kl_div", curr_patch_kl_div, prog_bar=True)
+        self.log("train_next_patch_pos_kl_div", next_patch_pos_kl_div)
 
         # self._optimizer_step(loss)
         skip_update = float(torch.isnan(total_loss))  # TODO: skip on grad norm
@@ -677,20 +745,19 @@ class FoVAE(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        (
-            (
-                total_loss,
-                curr_patch_total_loss,
-                curr_patch_rec_loss,
-                curr_patch_kl_div,
-                next_patch_z_pred_total_loss,
-            ),
-            step_sample_zs,
-            _,
-            _,
-            step_z_recons,
-            step_next_z_preds,
-        ) = self.forward(x, y)
+        forward_out = self.forward(x, y)
+        total_loss = forward_out["losses"]["total_loss"]
+        curr_patch_total_loss = forward_out["losses"]["curr_patch_total_loss"]
+        curr_patch_rec_loss = forward_out["losses"]["curr_patch_rec_loss"]
+        curr_patch_kl_div = forward_out["losses"]["curr_patch_kl_div"]
+        next_patch_z_pred_total_loss = forward_out["losses"]["next_patch_z_pred_total_loss"]
+        next_patch_pos_kl_div = forward_out["losses"]["next_patch_pos_kl_div"]
+
+        step_sample_zs = forward_out["step_vars"]["sample_zs"]
+        step_z_recons = forward_out["step_vars"]["z_recons"]
+        step_next_z_preds = forward_out["step_vars"]["pred_sample_zs"]
+        step_patch_positions = forward_out["step_vars"]["patch_positions"]
+
         # step_sample_zs: (n_steps, n_layers, batch_size, z_dim)
         # step_z_recons: (n_steps, n_layers, batch_size, z_dim)
         # last step_z_recons is the one used for reconstruction: step_z_recons[0, 0, -1].size()=n_channels*patch_dim*patch_dim
@@ -709,6 +776,7 @@ class FoVAE(pl.LightningModule):
         self.log("val_next_patch_zpred_total_loss", next_patch_z_pred_total_loss)
         self.log("val_curr_patch_rec_loss", curr_patch_rec_loss)
         self.log("val_curr_patch_kl_div", curr_patch_kl_div)
+        self.log("val_next_patch_pos_kl_div", next_patch_pos_kl_div)
 
         if batch_idx == 0:
             N_TO_PLOT = 4
@@ -732,11 +800,12 @@ class FoVAE(pl.LightningModule):
 
             # plot foveations on images
             for step, img_step_batch in enumerate(real_images):
-                positions = (
-                    step_sample_zs[step][0]
-                    .view(-1, self.num_channels, self.patch_dim, self.patch_dim)[:N_TO_PLOT, -2:]
-                    .mean(dim=(2, 3))
-                )
+                # positions = (
+                #     step_sample_zs[step][0]
+                #     .view(-1, self.num_channels, self.patch_dim, self.patch_dim)[:N_TO_PLOT, -2:]
+                #     .mean(dim=(2, 3))
+                # )
+                positions = step_patch_positions[step]
                 gaussian_filter_params = _recursive_to(
                     self._move_default_filter_params_to_loc(positions, (h, w), pad_offset=None),
                     "cpu",
@@ -803,6 +872,8 @@ class FoVAE(pl.LightningModule):
             for i, fig in enumerate(figs):
                 fig.tight_layout()
                 tensorboard.add_figure(f"Foveation Vis {i}", figs[i], global_step=self.global_step)
+
+            plt.close("all")
 
             # step constant bc real images don't change
             tensorboard.add_images(
@@ -895,16 +966,26 @@ class FoVAE(pl.LightningModule):
 
     #     self.log("n_skipped_steps", skipped_update, on_epoch=True, logger=True)
 
-    # def optimizer_step(
-    #     self,
-    #     epoch,
-    #     batch_idx,
-    #     optimizer,
-    #     optimizer_idx,
-    #     optimizer_closure,
-    #     on_tpu=False,
-    #     using_lbfgs=False,
-    # ):
+    def optimizer_step(
+        self,
+        epoch,
+        batch_idx,
+        optimizer,
+        optimizer_idx,
+        optimizer_closure,
+        on_tpu=False,
+        using_lbfgs=False,
+    ):
+        super().optimizer_step(
+            epoch,
+            batch_idx,
+            optimizer,
+            optimizer_idx,
+            optimizer_closure,
+            on_tpu=on_tpu,
+            using_lbfgs=using_lbfgs,
+        )
+
     #     # skip updates with nans
     #     if True:
     #         # the closure (which includes the `training_step`) will be executed by `optimizer.step`
