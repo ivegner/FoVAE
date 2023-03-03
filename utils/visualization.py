@@ -17,7 +17,7 @@ def imshow_unnorm(img: torch.Tensor, ax=None):
 def plot_gaussian_foveation_parameters(
     images: torch.Tensor, foveation_parameters: dict, axs=None, point_size=1
 ):
-    assert images.shape[0] == 4, "Image must be in BCHW format"
+    assert images.ndim == 4, "Image must be in BCHW format"
 
     if axs is not None:
         fig = None

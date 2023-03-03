@@ -178,7 +178,7 @@ def get_default_gaussian_foveation_filter_params(
                 generic_ring_specs["source_indices"]["fovea"], dtype=torch.float32, device=device
             ).unsqueeze(0) + 0.5,
             "sigmas": torch.tensor(
-                [0] * len(generic_ring_specs["source_indices"]["fovea"]),
+                [0.0] * len(generic_ring_specs["source_indices"]["fovea"]),
                 dtype=torch.float32,
                 device=device,
             ).unsqueeze(0),
@@ -229,7 +229,7 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
 
     x = torch.arange(0, w, device=image.device)
     y = torch.arange(0, h, device=image.device)
-    xx, yy = torch.meshgrid(x, y, indexing="ij")
+    xx, yy = torch.meshgrid(x, y, indexing="xy")
 
     # expand batch dim and ring_n dims
     # add 0.5 to get from indices to centers of pixels
@@ -250,8 +250,8 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
         # z_fig.colorbar(z_img)
 
         foveation_filters[:,
-            target_indices[:, 0],
-            target_indices[:, 1],
+            target_indices[:, 1], # switch order due to xy indexing. Don't ask.
+            target_indices[:, 0], # switch order due to xy indexing. Don't ask.
         ] = z.permute(0, 3, 1, 2) # permute z to (b, ring_n, h, w)
 
     # filter_fig, filter_ax = plt.subplots(1, 1, figsize=(5, 5))
