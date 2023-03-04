@@ -35,12 +35,26 @@ def plot_gaussian_foveation_parameters(
             sigmas = ring_specs[
                 "sigmas"
             ].mean()  # sigmas the same for all points in ring for every item in batch
-            ax.scatter(
-                ring_specs["mus"][i, :, 0],
-                ring_specs["mus"][i, :, 1],
-                s=sigmas * point_size,
-                label=f"Ring {ring_i}",
-            )
+
+            # plot translucent rectangle centered at mu with width and height 2*sigma
+            rect_size = sigmas
+            for mu in ring_specs["mus"][i]:
+                rect = plt.Rectangle(
+                    (mu[0] - rect_size, mu[1] - rect_size),
+                    2 * rect_size,
+                    2 * rect_size,
+                    linewidth=1,
+                    edgecolor="r",
+                    facecolor="none",
+                )
+                ax.add_patch(rect)
+
+            # ax.scatter(
+            #     ring_specs["mus"][i, :, 0],
+            #     ring_specs["mus"][i, :, 1],
+            #     s=sigmas * point_size,
+            #     label=f"Ring {ring_i}",
+            # )
 
         # put text of foveal central point in top left corner
         central_foveal_point = fovea_points.mean(dim=0)

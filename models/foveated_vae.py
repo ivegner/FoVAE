@@ -241,7 +241,7 @@ class FoVAE(pl.LightningModule):
                 image_dim=(image_dim, image_dim),
                 fovea_radius=fovea_radius,
                 image_out_dim=patch_dim,
-                ring_sigma_scaling_factor=1.0,
+                ring_sigma_scaling_factor=2, # in pyramidal case, pixel ring i averages 2^i pixels
             )
         )
 
@@ -437,10 +437,10 @@ class FoVAE(pl.LightningModule):
         b = sample_zs[0][0].size(0)
 
         positions_x = torch.linspace(
-            -1, 1, steps=int(np.ceil(self.image_dim / self.fovea_radius)), device=self.device
+            -1, 1, steps=int(np.ceil(self.image_dim / (self.fovea_radius * 2))), device=self.device
         )
         positions_y = torch.linspace(
-            -1, 1, steps=int(np.ceil(self.image_dim / self.fovea_radius)), device=self.device
+            -1, 1, steps=int(np.ceil(self.image_dim / (self.fovea_radius * 2))), device=self.device
         )
         positions = torch.stack(torch.meshgrid(positions_x, positions_y, indexing="xy"), dim=-1)
         positions = positions.view(-1, 2).unsqueeze(1).expand(-1, b, -1)
@@ -580,7 +580,7 @@ class FoVAE(pl.LightningModule):
         gaussian_filter_params = self._move_default_filter_params_to_loc(loc, (h, w), pad_offset)
 
         # foveate
-        foveated_image = fov_utils.apply_gaussian_foveation(padded_image, gaussian_filter_params)
+        foveated_image = fov_utils.apply_gaussian_foveation_pyramid(padded_image, gaussian_filter_params)
         if foveated_image.isnan().any():
             raise ValueError("NaNs in foveated image!")
         return foveated_image
@@ -871,6 +871,19 @@ class FoVAE(pl.LightningModule):
             # plot stepwise foveations on real images
             h, w = real_images.shape[3:]
 
+            # # DEBUG: demo foveation to a specific location
+            # fig, (ax1, ax2) = plt.subplots(2)
+            # loc = torch.tensor([-0.1, -0.25]).repeat(1, 1).to("mps")
+            # gaussian_filter_params = _recursive_to(self._move_default_filter_params_to_loc(loc, (h, w), pad_offset=None), "cpu",)
+            # plot_gaussian_foveation_parameters(
+            #                     x[[0]].cpu(),
+            #                     gaussian_filter_params,
+            #                     axs=[ax1],
+            #                     point_size=10,
+            #                 )
+            # fov = self._foveate_to_loc(x[[0]], loc).cpu()
+            # imshow_unnorm(fov[0], ax=ax2)
+
             # make figure with a column for each step and 3 rows: 1 for image with foveation, one for patch, one for patch reconstruction
 
             figs = [plt.figure(figsize=(self.n_steps * 3, 12)) for _ in range(N_TO_PLOT)]
@@ -958,7 +971,6 @@ class FoVAE(pl.LightningModule):
             _, reconstructed_images = self._reconstruct_image(
                 [[level[:N_TO_PLOT] for level in step] for step in step_sample_zs],
                 image=None,
-                # x[:N_TO_PLOT],
                 return_patches=True,
             )
             for i in range(N_TO_PLOT):

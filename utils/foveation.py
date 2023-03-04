@@ -206,6 +206,89 @@ def get_default_gaussian_foveation_filter_params(
 
 Z_EPS = 1e-2
 
+def apply_gaussian_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
+    """Sample image according to foveation params, sampling each peripheral point based on a Gaussian function
+    of its distance to other points in the image
+    Sampling is done via matrix-multiplication filtering
+    """
+
+    b, c, h, w = image.size()
+    fov_h, fov_w = foveation_params["foveated_image_dim"]
+
+    # def gaussian_kernel(size=5, device=torch.device('cpu'), channels=3, sigma=1, dtype=torch.float):
+    #     # Create Gaussian Kernel. In Numpy
+    #     interval  = (2*sigma +1)/(size)
+    #     ax = np.linspace(-(size - 1)/ 2., (size-1)/2., size)
+    #     xx, yy = np.meshgrid(ax, ax)
+    #     kernel = np.exp(-0.5 * (np.square(xx)+ np.square(yy)) / np.square(sigma))
+    #     kernel /= np.sum(kernel)
+    #     # Change kernel to PyTorch. reshapes to (channels, 1, size, size)
+    #     kernel_tensor = torch.as_tensor(kernel, dtype=dtype)
+    #     kernel_tensor = kernel_tensor.repeat(channels, 1 , 1, 1)
+    #     kernel_tensor.to(device)
+    #     return kernel_tensor
+
+    # def gaussian_conv2d(x, g_kernel, dtype=torch.float):
+    #     #Assumes input of x is of shape: (minibatch, depth, height, width)
+    #     #Infer depth automatically based on the shape
+    #     channels = g_kernel.shape[0]
+    #     padding = g_kernel.shape[-1] // 2 # Kernel size needs to be odd number
+    #     if len(x.shape) != 4:
+    #         raise IndexError('Expected input tensor to be of shape: (batch, depth, height, width) but got: ' + str(x.shape))
+    #     y = F.conv2d(x, weight=g_kernel, stride=1, padding=padding, groups=channels)
+    #     return y
+
+    # def downsample(x):
+    #     # Downsamples along  image (H,W). Takes every 2 pixels. output (H, W) = input (H/2, W/2)
+    #     return x[:, :, ::2, ::2]
+
+    def create_pyramid(x, kernel, levels, scale_factors):
+        # upsample = torch.nn.Upsample(scale_factor=scale_factor) # Default mode is nearest: [[1 2],[3 4]] -> [[1 1 2 2],[3 3 4 4]]
+        downsample = torch.nn.functional.avg_pool2d # torch.nn.functional.adaptive_avg_pool2d # Downsamples along image (H,W). Takes every 2 pixels. output (H, W) = input (H/2, W/2)
+        pyramids = []
+        # current_x = x
+        for level in range(0, levels):
+            # current_x = pyramids[-1]
+            scale_factor = round(scale_factors[level])
+            # gauss_filtered_x = gaussian_conv2d(current_x, kernel)
+            # down = downsample(gauss_filtered_x)
+            # down = downsample(x, (round(x.shape[2]//scale_factor), round(x.shape[3]//scale_factor)))
+            down = downsample(x, (scale_factor, scale_factor))
+            # laplacian = current_x - upsample(down)
+            # up = upsample(down)
+            # assert up.shape == current_x.shape
+            pyramids.append(down)
+        # pyramids.append(current_x)
+        return pyramids
+
+    foveated_image = torch.zeros((b, c, fov_h, fov_w), dtype=image.dtype, device=image.device)
+    # foveated_image[:, foveation_params["mapped_indices"]["fovea"][:, 0], foveation_params["mapped_indices"]["fovea"][:, 1]] = image[
+    #     :, foveation_params["source_indices"]["fovea"][:, 0], foveation_params["source_indices"]["fovea"][:, 1]
+    # ]
+
+    scale_factors = [1]
+    for i, ring in enumerate(foveation_params["peripheral_rings"]):
+        scale_factor = ring["sigmas"].mean().cpu().item() # TODO: there's really one sigma per ring, shouldn't have to average them
+        scale_factors.append(scale_factor)
+
+    pyramid = create_pyramid(image, None, levels=1+len(foveation_params["peripheral_rings"]), scale_factors=scale_factors)
+    for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
+        scale_factor = scale_factors[i]
+        target_indices = ring["target_indices"]
+        source_indices = torch.round((ring["mus"] - 0.5) / (scale_factor)).int()
+        n_indices = source_indices.size(1)
+        batch_idx = torch.arange(b).view(b, 1, 1).expand(-1, c, n_indices)
+        channel_idx = torch.arange(c).view(1, c, 1).expand(b, c, n_indices)
+        x_idx = source_indices[:, :, 1].view(b, 1, n_indices).expand(b, c, n_indices)
+        y_idx = source_indices[:, :, 0].view(b, 1, n_indices).expand(b, c, n_indices)
+        # foveated_image[
+        #     :, :, target_indices[:, 0], target_indices[:, 1]
+        # ] = pyramid[i][torch.arange(b).view(b, 1).expand(-1, source_indices.size(1)), :, source_indices[:, :, 1], source_indices[:, :, 0]].transpose(1, 2)  # pyramid[i].transpose(0, 1)[:, source_indices[:, :, 0], source_indices[:, :, 1]]
+        foveated_image[
+            :, :, target_indices[:, 1], target_indices[:, 0]
+        ] = pyramid[i][batch_idx, channel_idx, x_idx, y_idx]
+    return foveated_image
+
 
 def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
     """Sample image according to foveation params, sampling each peripheral point based on a Gaussian function
