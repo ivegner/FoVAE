@@ -1,6 +1,6 @@
 name: IP
 channels:
-  - pytorch-nightly # for Apple MPS support
+  - pytorch #-nightly # for Apple MPS support
   - conda-forge
 dependencies:
     - python=3.9
@@ -11,6 +11,7 @@ dependencies:
     - numpy
     - imageio
     - scipy
+    - pillow
     - jupyter_client==7.3.2 # Fix https://discourse.jupyter.org/t/jupyter-notebook-zmq-message-arrived-on-closed-channel-error/17869/10
     - tornado=6.1 # see above
     - pip:
