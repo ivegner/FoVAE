@@ -117,6 +117,8 @@ class FoVAE(pl.LightningModule):
         # do_add_pos_encoding=True,
         do_z_pred_cond_from_top=True,
         do_use_beta_norm=True,
+        do_random_foveation=False,
+        do_image_reconstruction=True,
     ):
         super().__init__()
 
@@ -225,14 +227,22 @@ class FoVAE(pl.LightningModule):
         self.grad_skip_threshold = grad_skip_threshold
         # self.do_add_pos_encoding = do_add_pos_encoding
         self.do_z_pred_cond_from_top = do_z_pred_cond_from_top
-        self.do_use_beta_norm = do_use_beta_norm
-        if self.do_use_beta_norm:
-            self.beta = (beta * z_dim) / input_dim  # according to beta-vae paper
+
+        if do_use_beta_norm:
+            beta_vae = (beta * z_dim) / input_dim  # according to beta-vae paper
             print(
-                f"Using beta_norm value of {self.beta:.6f} as beta, calculated from unnormalized beta {beta:.6f}"
+                f"Using normalized betas[1] value of {beta_vae:.6f} as beta, calculated from unnormalized beta_vae {beta:.6f}"
             )
         else:
-            self.beta = beta
+            beta_vae = beta
+
+        self.betas = dict(
+            curr_patch_recon=1,
+            curr_patch_kl=beta_vae,
+            next_patch_recon=1,
+            next_patch_pos_kl=1,
+            image_recon=1,
+        )
 
         # image: (b, c, image_dim[0], image_dim[1])
         # TODO: sparsify
@@ -241,9 +251,11 @@ class FoVAE(pl.LightningModule):
                 image_dim=(image_dim, image_dim),
                 fovea_radius=fovea_radius,
                 image_out_dim=patch_dim,
-                ring_sigma_scaling_factor=2, # in pyramidal case, pixel ring i averages 2^i pixels
+                ring_sigma_scaling_factor=2,  # in pyramidal case, pixel ring i averages 2^i pixels
             )
         )
+        self.do_random_foveation = do_random_foveation
+        self.do_image_reconstruction = do_image_reconstruction
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -327,10 +339,10 @@ class FoVAE(pl.LightningModule):
             assert torch.is_same_size(curr_patch_recon, curr_patch)
 
             # TODO: loss on all levels
-            _curr_patch_total_loss, _curr_patch_rec_loss, _curr_patch_kl_div = self._loss(
+            _curr_patch_rec_loss, _curr_patch_kl_div = self._loss(
                 curr_patch, curr_patch_recon, curr_z_mus[-1], curr_z_logvars[-1]
             )
-            curr_patch_total_loss += _curr_patch_total_loss
+            # curr_patch_total_loss += _curr_patch_total_loss
             curr_patch_rec_total_loss += _curr_patch_rec_loss
             curr_patch_total_kl_div += _curr_patch_kl_div
 
@@ -346,10 +358,11 @@ class FoVAE(pl.LightningModule):
             ) = self._predict_next_patch_loc(sample_zs)
             # calculate kl divergence between predicted next patch pos and std-normal prior
             # only do kl divergence because reconstruction of next_pos is captured in next_patch_rec_loss
-            _, _, _next_patch_pos_kl_div = self._loss(
-                mu=next_patch_pos_mus, logvar=next_patch_pos_logvars
-            )
-            next_patch_pos_kl_div += _next_patch_pos_kl_div
+            if not self.do_random_foveation:
+                _, _next_patch_pos_kl_div = self._loss(
+                    mu=next_patch_pos_mus, logvar=next_patch_pos_logvars
+                )
+                next_patch_pos_kl_div += _next_patch_pos_kl_div
             patch_positions.append(next_patch_sample_pos)
 
             # predict zs for next patch
@@ -390,29 +403,43 @@ class FoVAE(pl.LightningModule):
 
             patches.append(next_patch)
 
-        # TODO: reconstruct whole image
-        image_reconstruction_loss, _ = self._reconstruct_image(
-            sample_zs, x_full, return_patches=False
-        )
+        if self.do_image_reconstruction:
+            image_reconstruction_loss, _ = self._reconstruct_image(
+                sample_zs, x_full, return_patches=False
+            )
+        else:
+            image_reconstruction_loss = torch.tensor(0.0, device=self.device)
 
         # TODO: there's a memory leak somewhere, comes out during overfit_batches=1
 
-        curr_patch_total_loss /= self.n_steps
-        curr_patch_rec_total_loss /= self.n_steps
-        curr_patch_total_kl_div /= self.n_steps
-        next_patch_z_pred_total_loss /= self.n_steps
-        next_patch_pos_kl_div /= self.n_steps
+        curr_patch_rec_total_loss = (
+            curr_patch_rec_total_loss * self.betas["curr_patch_recon"] / self.n_steps
+        )
+        curr_patch_total_kl_div = (
+            curr_patch_total_kl_div * self.betas["curr_patch_kl"] / self.n_steps
+        )
+        next_patch_z_pred_total_loss = (
+            next_patch_z_pred_total_loss * self.betas["next_patch_recon"] / self.n_steps
+        )
+        next_patch_pos_kl_div = (
+            next_patch_pos_kl_div * self.betas["next_patch_pos_kl"] / self.n_steps
+        )
+        image_reconstruction_loss = image_reconstruction_loss * self.betas["image_recon"]
+
+        # curr_patch_total_loss = curr_patch_rec_total_loss + self.beta * curr_patch_total_kl_div
 
         total_loss = (
-            curr_patch_total_loss
+            curr_patch_rec_total_loss
+            + curr_patch_total_kl_div
             + next_patch_z_pred_total_loss
             + next_patch_pos_kl_div
             + image_reconstruction_loss
         )
+
         return dict(
             losses=dict(
                 total_loss=total_loss,
-                curr_patch_total_loss=curr_patch_total_loss,
+                curr_patch_total_loss=curr_patch_rec_total_loss + curr_patch_total_kl_div,
                 curr_patch_rec_loss=curr_patch_rec_total_loss,
                 curr_patch_kl_div=curr_patch_total_kl_div,
                 next_patch_z_pred_total_loss=next_patch_z_pred_total_loss,
@@ -469,9 +496,7 @@ class FoVAE(pl.LightningModule):
             image_recon_loss /= positions.size(0)
 
         if return_patches:
-            return image_recon_loss, torch.stack(
-               patches, dim=0
-            ).transpose(0, 1)
+            return image_recon_loss, torch.stack(patches, dim=0).transpose(0, 1)
         else:
             return image_recon_loss, None
 
@@ -525,12 +550,12 @@ class FoVAE(pl.LightningModule):
             except ValueError as e:
                 kl = torch.nan
 
-        total_loss = (
-            (self.beta * kl + recon_loss) if recon_loss is not None and kl is not None else None
-        )
+        # total_loss = (
+        #     (self.beta * kl + recon_loss) if recon_loss is not None and kl is not None else None
+        # )
 
         # maximize reconstruction likelihood (minimize its negative), minimize kl divergence
-        return total_loss, recon_loss, kl
+        return recon_loss, kl
 
     def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor):
         # image: (b, c, h, w)
@@ -580,7 +605,9 @@ class FoVAE(pl.LightningModule):
         gaussian_filter_params = self._move_default_filter_params_to_loc(loc, (h, w), pad_offset)
 
         # foveate
-        foveated_image = fov_utils.apply_gaussian_foveation_pyramid(padded_image, gaussian_filter_params)
+        foveated_image = fov_utils.apply_gaussian_foveation_pyramid(
+            padded_image, gaussian_filter_params
+        )
         if foveated_image.isnan().any():
             raise ValueError("NaNs in foveated image!")
         return foveated_image
@@ -611,9 +638,10 @@ class FoVAE(pl.LightningModule):
         gaussian_filter_params = deepcopy(self.default_gaussian_filter_params)  # TODO: optimize
         for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
             new_mus = ring["mus"] + (loc - generic_center).unsqueeze(1)
-            assert torch.isclose(
-                new_mus.mean(1), loc, atol=1e-6
-            ).all(), f"New gaussian centers after move not close to loc: e.g. {new_mus.mean(1)[0]} vs {loc[0]}"
+            if not torch.isclose(new_mus.mean(1), loc, atol=1e-2).all():
+                print(
+                    f"New gaussian centers after move not close to loc: {new_mus.mean(1)[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]} vs {loc[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]}"
+                )
             ring["mus"] = new_mus + pad_offset
 
         return gaussian_filter_params
@@ -653,13 +681,25 @@ class FoVAE(pl.LightningModule):
 
         Z_LEVEL_TO_PRED_LOC = -1  # TODO: make this a param, and maybe multiple levels
 
-        prev_top_zs = torch.stack([zs[Z_LEVEL_TO_PRED_LOC] for zs in prev_zs], dim=0)
-        prev_top_zs = prev_top_zs.transpose(0, 1)  # (b, n_steps, dim)
-        pred = self.next_location_predictor(prev_top_zs)
-        next_loc_mu, next_loc_logvar = pred[:, :2], pred[:, 2:]
-        next_loc = reparam_sample(next_loc_mu, next_loc_logvar)
+        if self.do_random_foveation:
+            return (
+                F.sigmoid(torch.randn((prev_zs[0][0].size(0)), 2, device=prev_zs[0][0].device)) * 2
+                - 1
+            )
 
-        return torch.clamp(next_loc, -1, 1), next_loc_mu, next_loc_logvar
+        else:
+            prev_top_zs = torch.stack([zs[Z_LEVEL_TO_PRED_LOC] for zs in prev_zs], dim=0)
+            prev_top_zs = prev_top_zs.transpose(0, 1)  # (b, n_steps, dim)
+            pred = self.next_location_predictor(prev_top_zs)
+            next_loc_mu, next_loc_logvar = pred[:, :2], pred[:, 2:]
+            next_loc = reparam_sample(next_loc_mu, next_loc_logvar)
+
+            return (
+                # F.sigmoid(next_loc)*2 - 1,
+                torch.clamp(next_loc, -1, 1),
+                next_loc_mu,
+                next_loc_logvar,
+            )
 
     def _predict_next_patch_zs(
         self, prev_zs: List[List[torch.Tensor]], next_patch_pos: torch.Tensor
@@ -716,9 +756,9 @@ class FoVAE(pl.LightningModule):
     def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
         b, c, h, w = x.size()
         # add position encoding as in wattersSpatialBroadcastDecoder2019
-        width_pos = torch.linspace(-1, 1, w)
         height_pos = torch.linspace(-1, 1, h)
-        xb, yb = torch.meshgrid(width_pos, height_pos)
+        width_pos = torch.linspace(-1, 1, w)
+        xb, yb = torch.meshgrid(height_pos, width_pos, indexing="xy")
         # match dimensions of x except for channels
         xb = xb.expand(b, 1, -1, -1).to(x.device)
         yb = yb.expand(b, 1, -1, -1).to(x.device)
@@ -871,18 +911,18 @@ class FoVAE(pl.LightningModule):
             # plot stepwise foveations on real images
             h, w = real_images.shape[3:]
 
-            # # DEBUG: demo foveation to a specific location
+            # # # # DEBUG: demo foveation to a specific location
             # fig, (ax1, ax2) = plt.subplots(2)
-            # loc = torch.tensor([-0.1, -0.25]).repeat(1, 1).to("mps")
+            # loc = torch.tensor([0.0, 0.0]).repeat(1, 1).to("mps")
             # gaussian_filter_params = _recursive_to(self._move_default_filter_params_to_loc(loc, (h, w), pad_offset=None), "cpu",)
             # plot_gaussian_foveation_parameters(
-            #                     x[[0]].cpu(),
+            #                     x[[3]].cpu(),
             #                     gaussian_filter_params,
             #                     axs=[ax1],
             #                     point_size=10,
             #                 )
-            # fov = self._foveate_to_loc(x[[0]], loc).cpu()
-            # imshow_unnorm(fov[0], ax=ax2)
+            # fov = self._foveate_to_loc(self._add_pos_encodings_to_img_batch(x[[3]]), loc).cpu()
+            # imshow_unnorm(fov[0,[0]], ax=ax2)
 
             # make figure with a column for each step and 3 rows: 1 for image with foveation, one for patch, one for patch reconstruction
 
@@ -963,6 +1003,7 @@ class FoVAE(pl.LightningModule):
             for i, fig in enumerate(figs):
                 fig.tight_layout()
                 tensorboard.add_figure(f"Foveation Vis {i}", figs[i], global_step=self.global_step)
+                del fig
 
             plt.close("all")
 
@@ -983,11 +1024,11 @@ class FoVAE(pl.LightningModule):
                 tensorboard.add_image(
                     f"Image Reconstructions {i}",
                     torchvision.utils.make_grid(
-                        remove_pos_channels_from_batch(reconstructed_images[i]), nrow=int(np.sqrt(len(reconstructed_images[i])))
+                        remove_pos_channels_from_batch(reconstructed_images[i]),
+                        nrow=int(np.sqrt(len(reconstructed_images[i]))),
                     ),
                     global_step=self.global_step,
                 )
-
 
             # step constant bc real images don't change
             tensorboard.add_images(
