@@ -1,12 +1,11 @@
 name: IP
 channels:
-  - pytorch
-  - nvidia
+  - pytorch-nightly # for Apple MPS support
   - conda-forge
 dependencies:
     - python=3.9
     - pip>=19.0
-    - pytorch-cuda=11.7
+    - pytorch
     - torchvision
     - jupyter
     - numpy

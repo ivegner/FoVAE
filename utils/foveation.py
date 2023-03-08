@@ -283,12 +283,12 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
     for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
         scale_factor = scale_factors[i]
         target_indices = ring["target_indices"]
-        source_indices = torch.floor((ring["mus"] - 0.5) / scale_factor).int()
+        source_indices = torch.floor((ring["mus"] - 0.5) / scale_factor).long()
         n_indices = source_indices.size(1)
-        batch_idx = torch.arange(b).view(b, 1, 1).expand(-1, c, n_indices)
-        channel_idx = torch.arange(c).view(1, c, 1).expand(b, c, n_indices)
-        x_idx = source_indices[:, :, 1].view(b, 1, n_indices).expand(b, c, n_indices)
-        y_idx = source_indices[:, :, 0].view(b, 1, n_indices).expand(b, c, n_indices)
+        batch_idx = torch.arange(b).view(b, 1, 1).expand(-1, c, n_indices).long()
+        channel_idx = torch.arange(c).view(1, c, 1).expand(b, c, n_indices).long()
+        x_idx = source_indices[:, :, 1].view(b, 1, n_indices).expand(b, c, n_indices).long()
+        y_idx = source_indices[:, :, 0].view(b, 1, n_indices).expand(b, c, n_indices).long()
 
         # check validity of x_idx and y_idx
         assert (x_idx >= 0).all() and (
