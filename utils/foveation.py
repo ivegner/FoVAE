@@ -176,7 +176,8 @@ def get_default_gaussian_foveation_filter_params(
             # add 0.5 to indices to get center of pixel
             "mus": torch.tensor(
                 generic_ring_specs["source_indices"]["fovea"], dtype=torch.float32, device=device
-            ).unsqueeze(0) + 0.5,
+            ).unsqueeze(0)
+            + 0.5,
             "sigmas": torch.tensor(
                 [0.0] * len(generic_ring_specs["source_indices"]["fovea"]),
                 dtype=torch.float32,
@@ -206,10 +207,10 @@ def get_default_gaussian_foveation_filter_params(
 
 Z_EPS = 1e-2
 
-def apply_gaussian_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
-    """Sample image according to foveation params, sampling each peripheral point based on a Gaussian function
-    of its distance to other points in the image
-    Sampling is done via matrix-multiplication filtering
+
+def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
+    """Sample image according to foveation params, sampling each peripheral point based
+    on a AvgPool2D mean of its surrounding points
     """
 
     b, c, h, w = image.size()
@@ -244,7 +245,10 @@ def apply_gaussian_foveation_pyramid(image: torch.Tensor, foveation_params: dict
 
     def create_pyramid(x, kernel, levels, scale_factors):
         # upsample = torch.nn.Upsample(scale_factor=scale_factor) # Default mode is nearest: [[1 2],[3 4]] -> [[1 1 2 2],[3 3 4 4]]
-        downsample = torch.nn.functional.avg_pool2d # torch.nn.functional.adaptive_avg_pool2d # Downsamples along image (H,W). Takes every 2 pixels. output (H, W) = input (H/2, W/2)
+        # Downsamples along image (H,W). Takes every 2 pixels. output (H, W) = input (H/2, W/2)
+        downsample = (
+            torch.nn.functional.avg_pool2d
+        )  # torch.nn.functional.adaptive_avg_pool2d
         pyramids = []
         # current_x = x
         for level in range(0, levels):
@@ -262,31 +266,41 @@ def apply_gaussian_foveation_pyramid(image: torch.Tensor, foveation_params: dict
         return pyramids
 
     foveated_image = torch.zeros((b, c, fov_h, fov_w), dtype=image.dtype, device=image.device)
-    # foveated_image[:, foveation_params["mapped_indices"]["fovea"][:, 0], foveation_params["mapped_indices"]["fovea"][:, 1]] = image[
-    #     :, foveation_params["source_indices"]["fovea"][:, 0], foveation_params["source_indices"]["fovea"][:, 1]
-    # ]
 
     scale_factors = [1]
     for i, ring in enumerate(foveation_params["peripheral_rings"]):
-        scale_factor = ring["sigmas"].mean().cpu().item() # TODO: there's really one sigma per ring, shouldn't have to average them
+        scale_factor = (
+            ring["sigmas"].mean().cpu().item()
+        )  # TODO: there's really one sigma per ring, shouldn't have to average them
         scale_factors.append(scale_factor)
 
-    pyramid = create_pyramid(image, None, levels=1+len(foveation_params["peripheral_rings"]), scale_factors=scale_factors)
+    pyramid = create_pyramid(
+        image,
+        None,
+        levels=1 + len(foveation_params["peripheral_rings"]),
+        scale_factors=scale_factors,
+    )
     for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
         scale_factor = scale_factors[i]
         target_indices = ring["target_indices"]
-        source_indices = torch.round((ring["mus"] - 0.5) / (scale_factor)).int()
+        source_indices = torch.floor((ring["mus"] - 0.5) / scale_factor).int()
         n_indices = source_indices.size(1)
         batch_idx = torch.arange(b).view(b, 1, 1).expand(-1, c, n_indices)
         channel_idx = torch.arange(c).view(1, c, 1).expand(b, c, n_indices)
         x_idx = source_indices[:, :, 1].view(b, 1, n_indices).expand(b, c, n_indices)
         y_idx = source_indices[:, :, 0].view(b, 1, n_indices).expand(b, c, n_indices)
-        # foveated_image[
-        #     :, :, target_indices[:, 0], target_indices[:, 1]
-        # ] = pyramid[i][torch.arange(b).view(b, 1).expand(-1, source_indices.size(1)), :, source_indices[:, :, 1], source_indices[:, :, 0]].transpose(1, 2)  # pyramid[i].transpose(0, 1)[:, source_indices[:, :, 0], source_indices[:, :, 1]]
-        foveated_image[
-            :, :, target_indices[:, 1], target_indices[:, 0]
-        ] = pyramid[i][batch_idx, channel_idx, x_idx, y_idx]
+
+        # check validity of x_idx and y_idx
+        assert (x_idx >= 0).all() and (
+            x_idx < pyramid[i].shape[2]
+        ).all(), f"Invalid x_idx for indexing pyramid of size {pyramid[i].shape[2]}: {x_idx}"
+        assert (y_idx >= 0).all() and (
+            y_idx < pyramid[i].shape[3]
+        ).all(), f"Invalid y_idx for indexing pyramid of size {pyramid[i].shape[3]}: {y_idx}"
+
+        foveated_image[:, :, target_indices[:, 1], target_indices[:, 0]] = pyramid[i][
+            batch_idx, channel_idx, x_idx, y_idx
+        ]
     return foveated_image
 
 
@@ -320,22 +334,29 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
     yy = yy.unsqueeze(0).unsqueeze(-1).to(torch.float) + 0.5
 
     for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
-        mu = ring["mus"].unsqueeze(1).unsqueeze(1).to(torch.float) # unsqueeze to add h, w dims
+        mu = ring["mus"].unsqueeze(1).unsqueeze(1).to(torch.float)  # unsqueeze to add h, w dims
         sigma = ring["sigmas"]
         target_indices = ring["target_indices"]
 
         # build gaussian
         # TODO: check formula
         # TODO: clip to relevant region only
-        z = torch.exp(-((xx - mu[:, :, :, :, 0]) ** 2 + (yy - mu[:, :, :, :, 1]) ** 2) / (2 * sigma**2 + Z_EPS))
-        z = z / torch.sum(z, axis=(1, 2), keepdim=True) # normalize
+        z = torch.exp(
+            -((xx - mu[:, :, :, :, 0]) ** 2 + (yy - mu[:, :, :, :, 1]) ** 2)
+            / (2 * sigma**2 + Z_EPS)
+        )
+        z = z / torch.sum(z, axis=(1, 2), keepdim=True)  # normalize
         # z_img = z_ax[i].imshow(z.sum(axis=2))
         # z_fig.colorbar(z_img)
 
-        foveation_filters[:,
-            target_indices[:, 1], # switch order due to xy indexing. Don't ask.
-            target_indices[:, 0], # switch order due to xy indexing. Don't ask.
-        ] = z.permute(0, 3, 1, 2) # permute z to (b, ring_n, h, w)
+        # permute z to (b, ring_n, h, w)
+        foveation_filters[
+            :,
+            target_indices[:, 1],  # switch order due to xy indexing. Don't ask.
+            target_indices[:, 0],  # switch order due to xy indexing. Don't ask.
+        ] = z.permute(
+            0, 3, 1, 2
+        )
 
     # filter_fig, filter_ax = plt.subplots(1, 1, figsize=(5, 5))
     # g = filter_ax.imshow(foveation_filters[0].sum(axis=(0, 1)))

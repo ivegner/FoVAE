@@ -29,7 +29,17 @@ def _recursive_to(x, *args, **kwargs):
 
 def reparam_sample(mu, logvar):
     std = torch.exp(0.5 * logvar)  # e^(1/2 * log(std^2))
-    eps = torch.randn_like(std)  # random ~ N(0, 1)
+    i = 0
+    while i < 5:
+        # randn_like sometimes produces NaNs for unknown reasons
+        # maybe see: https://github.com/pytorch/pytorch/issues/46155
+        # so we try again if that happens
+        eps = torch.randn_like(std)  # random ~ N(0, 1)
+        if not torch.isnan(eps).any():
+            break
+        i += 1
+    else:
+        raise RuntimeError("Could not sample from N(0, 1) without NaNs after 5 tries")
     return mu + std * eps
 
 
@@ -605,7 +615,7 @@ class FoVAE(pl.LightningModule):
         gaussian_filter_params = self._move_default_filter_params_to_loc(loc, (h, w), pad_offset)
 
         # foveate
-        foveated_image = fov_utils.apply_gaussian_foveation_pyramid(
+        foveated_image = fov_utils.apply_mean_foveation_pyramid(
             padded_image, gaussian_filter_params
         )
         if foveated_image.isnan().any():
@@ -638,7 +648,7 @@ class FoVAE(pl.LightningModule):
         gaussian_filter_params = deepcopy(self.default_gaussian_filter_params)  # TODO: optimize
         for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
             new_mus = ring["mus"] + (loc - generic_center).unsqueeze(1)
-            if not torch.isclose(new_mus.mean(1), loc, atol=1e-2).all():
+            if not torch.isclose(new_mus.mean(1), loc, atol=1e-4).all():
                 print(
                     f"New gaussian centers after move not close to loc: {new_mus.mean(1)[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]} vs {loc[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]}"
                 )
