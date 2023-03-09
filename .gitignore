@@ -1,6 +1,8 @@
 .vscode/
 data/
-lightning_logs/
+lightning_logs*/
+**/.DS_Store
+*.txt
 
 _snippets.py
 **/*.png

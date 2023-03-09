@@ -1,3 +1,8 @@
+import gc
+from copy import deepcopy
+from typing import *
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -5,15 +10,12 @@ import torch.nn.functional as F
 import torch.nn.init as init
 import torchvision
 from torch import nn, optim
-from typing import *
-from copy import deepcopy
 
-import matplotlib.pyplot as plt
-
-from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters
-from utils.vae_utils import gaussian_likelihood, gaussian_kl_divergence
 import utils.foveation as fov_utils
 from modules.transformers import VisionTransformer
+from utils.vae_utils import gaussian_kl_divergence, gaussian_likelihood
+from utils.visualization import (imshow_unnorm,
+                                 plot_gaussian_foveation_parameters)
 
 
 def _recursive_to(x, *args, **kwargs):
@@ -249,9 +251,9 @@ class FoVAE(pl.LightningModule):
         self.betas = dict(
             curr_patch_recon=1,
             curr_patch_kl=beta_vae,
-            next_patch_recon=1,
-            next_patch_pos_kl=1,
-            image_recon=1,
+            next_patch_recon=100,
+            next_patch_pos_kl=10,
+            image_recon=100,
         )
 
         # image: (b, c, image_dim[0], image_dim[1])
@@ -752,7 +754,7 @@ class FoVAE(pl.LightningModule):
                 # prev_same_level_z = prev_zs[-1][z_level_to_predict]
                 prev_higher_level_z = prev_zs[-1][z_level_to_predict + 1]
                 x = prev_higher_level_z
-                # ondition on current predicted z of higher level?
+                # condition on current predicted z of higher level?
                 if self.do_z_pred_cond_from_top:
                     curr_higher_level_pred_z = next_zs[0]  # 0 because prepended
                     x = torch.cat((x, curr_higher_level_pred_z), dim=1)
@@ -1034,7 +1036,7 @@ class FoVAE(pl.LightningModule):
                 tensorboard.add_image(
                     f"Image Reconstructions {i}",
                     torchvision.utils.make_grid(
-                        remove_pos_channels_from_batch(reconstructed_images[i]),
+                        remove_pos_channels_from_batch(reconstructed_images[i]) / 2 + 0.5,
                         nrow=int(np.sqrt(len(reconstructed_images[i]))),
                     ),
                     global_step=self.global_step,
@@ -1151,6 +1153,10 @@ class FoVAE(pl.LightningModule):
             using_lbfgs=using_lbfgs,
         )
 
+    def on_train_epoch_end(self) -> None:
+        k = super().on_train_epoch_end()
+        gc.collect()
+        return k
     #     # skip updates with nans
     #     if True:
     #         # the closure (which includes the `training_step`) will be executed by `optimizer.step`

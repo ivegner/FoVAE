@@ -305,9 +305,11 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
 
 
 def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
-    """Sample image according to foveation params, sampling each peripheral point based on a Gaussian function
+    """Sample image according to foveation params, sampling each peripheral point
+    from a AvgPool2d layer with a kernel size proportional to the inverse
     of its distance to other points in the image
-    Sampling is done via matrix-multiplication filtering
+
+    Adapted from: https://gist.github.com/Harimus/918fddd8bdc6e13e4acf3d213f2f24cd
     """
 
     b, c, h, w = image.size()
