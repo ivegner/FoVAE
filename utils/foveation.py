@@ -282,7 +282,7 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
     )
     for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
         scale_factor = scale_factors[i]
-        target_indices = ring["target_indices"]
+        target_indices = ring["target_indices"].long()
         source_indices = torch.floor((ring["mus"] - 0.5) / scale_factor).long()
         n_indices = source_indices.size(1)
         batch_idx = torch.arange(b).view(b, 1, 1).expand(-1, c, n_indices).long()

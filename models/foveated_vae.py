@@ -993,7 +993,7 @@ class FoVAE(pl.LightningModule):
                 pred_patches = remove_pos_channels_from_batch(pred_patches)
                 for i in range(N_TO_PLOT):
                     ax = axs[i][3][step]
-                    imshow_unnorm(patches[i].cpu(), ax=ax)
+                    imshow_unnorm(pred_patches[i].cpu(), ax=ax)
                     ax.set_title(
                         f"Next patch pred. at step {step} - ({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
                         fontsize=8,
