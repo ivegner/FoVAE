@@ -14,8 +14,7 @@ from torch import nn, optim
 import utils.foveation as fov_utils
 from modules.transformers import VisionTransformer
 from utils.vae_utils import gaussian_kl_divergence, gaussian_likelihood
-from utils.visualization import (imshow_unnorm,
-                                 plot_gaussian_foveation_parameters)
+from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters
 
 
 def _recursive_to(x, *args, **kwargs):
@@ -131,6 +130,7 @@ class FoVAE(pl.LightningModule):
         do_use_beta_norm=True,
         do_random_foveation=False,
         do_image_reconstruction=True,
+        do_next_patch_prediction=True,
     ):
         super().__init__()
 
@@ -150,8 +150,8 @@ class FoVAE(pl.LightningModule):
 
         input_dim = self.patch_dim * self.patch_dim * self.num_channels
 
-        self.encoders = nn.ModuleList([UpBlock(input_dim, z_dim)])  # , [1024, 256]),
-        self.decoders = nn.ModuleList([DownBlock(z_dim, input_dim)])  # , [256, 1024]),
+        self.encoders = nn.ModuleList([UpBlock(input_dim, z_dim, [256, 256])])
+        self.decoders = nn.ModuleList([DownBlock(z_dim, input_dim, [256, 256])])
 
         # for all levels except the highest-level next-patch-z predictor, the predictors are
         # DownBlocks analogous to the decoders
@@ -172,7 +172,6 @@ class FoVAE(pl.LightningModule):
             ]
         )
 
-        # TODO
         self.next_location_predictor = VisionTransformer(
             input_dim=z_dim,
             output_dim=2 * 2,
@@ -183,58 +182,7 @@ class FoVAE(pl.LightningModule):
             dropout=0,
         )
 
-        # self.encoder = nn.Sequential(
-        #     View((-1, input_dim)),
-        #     nn.GELU(),
-        #     nn.Linear(input_dim, 1024),
-        #     nn.GELU(),
-        #     nn.Linear(1024, 256),
-        #     nn.GELU(),
-        #     nn.Linear(256, z_dim * 2),
-        # )
-        # self.decoder = nn.Sequential(
-        #     nn.GELU(),
-        #     nn.Linear(z_dim, 256),
-        #     nn.GELU(),
-        #     nn.Linear(256, 1024),
-        #     nn.GELU(),
-        #     nn.Linear(1024, input_dim),
-        #     View((-1, self.num_channels, self.patch_dim, self.patch_dim)),
-        # )
         self._beta = beta
-        # self.encoder = nn.Sequential(
-        #     # nn.Conv2d(3, 32, 4, 2, 1),          # B,  32, 32, 32
-        #     # nn.ReLU(True),
-        #     nn.Conv2d(3, 32, 4, 2, 1),          # B,  32, 16, 16
-        #     nn.ReLU(True),
-        #     nn.Conv2d(32, 64, 4, 2, 1),          # B,  64,  8,  8
-        #     nn.ReLU(True),
-        #     nn.Conv2d(64, 64, 4, 2, 1),          # B,  64,  4,  4
-        #     nn.ReLU(True),
-        #     nn.Conv2d(64, 256, 4, 1),            # B, 256,  1,  1
-        #     nn.ReLU(True),
-        #     View((-1, 256*1*1)),                 # B, 256
-        #     nn.Linear(256, z_dim*2),             # B, z_dim*2
-        # )
-        # self.decoder = nn.Sequential(
-        #     nn.Linear(z_dim, 256),               # B, 256
-        #     View((-1, 256, 1, 1)),               # B, 256,  1,  1
-        #     nn.ReLU(True),
-        #     nn.ConvTranspose2d(256, 64, 4),      # B,  64,  4,  4
-        #     nn.ReLU(True),
-        #     nn.ConvTranspose2d(64, 64, 4, 2, 1), # B,  64,  8,  8
-        #     nn.ReLU(True),
-        #     nn.ConvTranspose2d(64, 32, 4, 2, 1), # B,  32, 16, 16
-        #     nn.ReLU(True),
-        #     nn.ConvTranspose2d(32, 3, 4, 2, 1), # B,  nc, 32, 32
-        #     # nn.ReLU(True),
-        #     # nn.ConvTranspose2d(32, 3, 4, 2, 1),  # B, nc, 64, 64
-        # )
-        # for block in self._modules:
-        #     for m in self._modules[block]:
-        #         kaiming_init(m)
-
-        # self.grad_clip = grad_clip
 
         self.grad_skip_threshold = grad_skip_threshold
         # self.do_add_pos_encoding = do_add_pos_encoding
@@ -268,6 +216,7 @@ class FoVAE(pl.LightningModule):
         )
         self.do_random_foveation = do_random_foveation
         self.do_image_reconstruction = do_image_reconstruction
+        self.do_next_patch_prediction = do_next_patch_prediction
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -338,7 +287,7 @@ class FoVAE(pl.LightningModule):
             curr_sample_zs, curr_z_mus, curr_z_logvars = self._encode_patch(curr_patch)
 
             # if any previous predicted patch, calculate loss between current patch and previous predicted patch
-            if len(pred_sample_zs) > 0:
+            if self.do_next_patch_prediction and len(pred_sample_zs) > 0:
                 prev_pred_sample_zs = pred_sample_zs[-1]
                 for i in range(len(prev_pred_sample_zs)):
                     next_patch_z_pred_total_loss += F.mse_loss(
@@ -423,6 +372,10 @@ class FoVAE(pl.LightningModule):
             image_reconstruction_loss = torch.tensor(0.0, device=self.device)
 
         # TODO: there's a memory leak somewhere, comes out during overfit_batches=1
+        # Notes on memory leak:
+        # https://github.com/Lightning-AI/lightning/issues/16876
+        # https://github.com/pytorch/pytorch/issues/13246
+        # https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/
 
         curr_patch_rec_total_loss = (
             curr_patch_rec_total_loss * self.betas["curr_patch_recon"] / self.n_steps
@@ -694,10 +647,7 @@ class FoVAE(pl.LightningModule):
         Z_LEVEL_TO_PRED_LOC = -1  # TODO: make this a param, and maybe multiple levels
 
         if self.do_random_foveation:
-            return (
-                F.sigmoid(torch.randn((prev_zs[0][0].size(0)), 2, device=prev_zs[0][0].device)) * 2
-                - 1
-            )
+            return torch.rand((prev_zs[0][0].size(0), 2), device=prev_zs[0][0].device) * 2 - 1, None, None
 
         else:
             prev_top_zs = torch.stack([zs[Z_LEVEL_TO_PRED_LOC] for zs in prev_zs], dim=0)
@@ -1019,28 +969,28 @@ class FoVAE(pl.LightningModule):
 
             plt.close("all")
 
-            # figs = [plt.figure(figsize=(12, 12)) for _ in range(N_TO_PLOT)]
-            # axs = [f.subplots(1, 1) for f in figs]
-            _, reconstructed_images = self._reconstruct_image(
-                [[level[:N_TO_PLOT] for level in step] for step in step_sample_zs],
-                image=None,
-                return_patches=True,
-            )
-            for i in range(N_TO_PLOT):
-                # ax = axs[i]
-                # imshow_unnorm(patches[i].cpu(), ax=ax)
-                # ax.set_title(
-                #     f"Next patch pred. at step {step} - ({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
-                #     fontsize=8,
-                # )
-                tensorboard.add_image(
-                    f"Image Reconstructions {i}",
-                    torchvision.utils.make_grid(
-                        remove_pos_channels_from_batch(reconstructed_images[i]) / 2 + 0.5,
-                        nrow=int(np.sqrt(len(reconstructed_images[i]))),
-                    ),
-                    global_step=self.global_step,
+            if self.do_image_reconstruction:
+                _, reconstructed_images = self._reconstruct_image(
+                    [[level[:N_TO_PLOT] for level in step] for step in step_sample_zs],
+                    image=None,
+                    return_patches=True,
                 )
+
+                for i in range(N_TO_PLOT):
+                    # ax = axs[i]
+                    # imshow_unnorm(patches[i].cpu(), ax=ax)
+                    # ax.set_title(
+                    #     f"Next patch pred. at step {step} - ({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
+                    #     fontsize=8,
+                    # )
+                    tensorboard.add_image(
+                        f"Image Reconstructions {i}",
+                        torchvision.utils.make_grid(
+                            remove_pos_channels_from_batch(reconstructed_images[i]) / 2 + 0.5,
+                            nrow=int(np.sqrt(len(reconstructed_images[i]))),
+                        ),
+                        global_step=self.global_step,
+                    )
 
             # step constant bc real images don't change
             tensorboard.add_images(
@@ -1049,6 +999,8 @@ class FoVAE(pl.LightningModule):
                     step_sample_zs[0][0][:32].view(
                         -1, self.num_channels, self.patch_dim, self.patch_dim
                     )
+                    / 2
+                    + 0.5
                 ),
                 global_step=0,
             )
@@ -1058,6 +1010,8 @@ class FoVAE(pl.LightningModule):
                     step_z_recons[0][-1][:32].view(
                         -1, self.num_channels, self.patch_dim, self.patch_dim
                     )
+                    / 2
+                    + 0.5
                 ),
                 global_step=self.global_step,
             )
@@ -1157,6 +1111,7 @@ class FoVAE(pl.LightningModule):
         k = super().on_train_epoch_end()
         gc.collect()
         return k
+
     #     # skip updates with nans
     #     if True:
     #         # the closure (which includes the `training_step`) will be executed by `optimizer.step`
