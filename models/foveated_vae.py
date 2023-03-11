@@ -53,60 +53,443 @@ class View(nn.Module):
         return tensor.view(self.size)
 
 
-class UpBlock(nn.Module):
-    def __init__(self, from_sample_dim, to_z_dim, hidden_ff_out_dims=None):
+class FFNet(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_ff_out_dims=None):
         super().__init__()
-        self.out_z_dim = to_z_dim
+        self.out_dim = out_dim
 
         if not hidden_ff_out_dims:
             hidden_ff_out_dims = []
 
-        # if no hidden dims provided, will contain just z dim (*2 bc mean and logvar)
-        hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim * 2]
+        # if no hidden dims provided, will contain just out_dim
+        hidden_ff_out_dims = [*hidden_ff_out_dims, out_dim]
 
         stack = []
-        last_out_dim = from_sample_dim
+        last_out_dim = in_dim
         for nn_out_dim in hidden_ff_out_dims:
             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
             last_out_dim = nn_out_dim
 
-        self.encoder = nn.Sequential(View((-1, from_sample_dim)), *stack)
+        self.encoder = nn.Sequential(*stack)
 
     def forward(self, x):
-        distributions = self.encoder(x)
-        mu = distributions[:, : self.out_z_dim]
-        logvar = distributions[:, self.out_z_dim :]
-        return mu, logvar
+        return self.encoder(x)
 
 
-class DownBlock(nn.Module):
-    def __init__(self, from_dim, to_dim, hidden_ff_out_dims=None):
+class Ladder(nn.Module):
+    def __init__(self, in_dim: int, layer_out_dims: List[int], layer_hidden_dims: List[List[int]]):
+        super().__init__()
+        self.layer_out_dims = layer_out_dims
+
+        layer_out_dims = [in_dim, *layer_out_dims]
+
+        self.layers = nn.ModuleList(
+            [
+                FFNet(
+                    layer_out_dims[i],
+                    layer_out_dims[i + 1],
+                    hidden_ff_out_dims=layer_hidden_dims[i],
+                )
+                for i in range(len(layer_out_dims) - 1)
+            ]
+        )
+
+    def forward(self, x):
+        ladder_outputs = []
+        x = x.view(x.size(0), -1)
+        for layer in self.layers:
+            x = layer(x)
+            ladder_outputs.append(x)
+        return ladder_outputs
+
+
+class LadderVAE(nn.Module):
+    def __init__(
+        self,
+        in_dim: int,
+        ladder_dims: List[int],
+        z_dims: List[int],
+        inference_hidden_dims: List[List[int]],
+        generative_hidden_dims: List[List[int]],
+    ):
         super().__init__()
 
-        if not hidden_ff_out_dims:
-            hidden_ff_out_dims = []
+        n_vae_layers = len(ladder_dims)
 
-        # if no hidden dims provided, will contain just to_dim
-        hidden_ff_out_dims = [*hidden_ff_out_dims, to_dim]
+        assert (
+            n_vae_layers == len(z_dims) == len(inference_hidden_dims) == len(generative_hidden_dims)
+        ), "All LadderVAE spec parameters must have same length"
 
-        stack = []
-        last_out_dim = from_dim
-        for nn_out_dim in hidden_ff_out_dims:
-            stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
-            last_out_dim = nn_out_dim
+        self.inference_layers = nn.ModuleList(
+            [
+                FFNet(ladder_dims[i], z_dims[i] * 2, hidden_ff_out_dims=inference_hidden_dims[i])
+                for i in range(n_vae_layers)
+            ]
+        )
 
-        self.decoder = nn.Sequential(View((-1, from_dim)), *stack)
+        _z_dims = [in_dim, *z_dims]
+        self.generative_layers = nn.ModuleList(
+            [
+                FFNet(_z_dims[i + 1], _z_dims[i] * 2, hidden_ff_out_dims=generative_hidden_dims[i])
+                for i in range(n_vae_layers)
+            ]
+        )
 
-    def forward(self, x):
-        return self.decoder(x)
+        assert len(self.inference_layers) == len(
+            self.generative_layers
+        ), "Inference and generative layers should have same length"
+
+        self.n_vae_layers = n_vae_layers
+        self.ladder_dims = ladder_dims
+        self.z_dims = z_dims
+
+    def forward(self, ladder_outputs: List[torch.Tensor]):
+        assert (
+            len(ladder_outputs) == self.n_vae_layers
+        ), "Ladder outputs should have same length as number of layers"
+
+        # inference
+        mu_logvars_inf = []
+        for ladder_x, layer in zip(ladder_outputs, self.inference_layers):
+            distribution = layer(ladder_x)
+            z_dim = int(distribution.size(1) / 2)
+            assert z_dim == (distribution.size(1) / 2), "Inference latent dimension should be even"
+            mu, logvar = distribution[:, :z_dim], distribution[:, z_dim:]
+            mu_logvars_inf.append((mu, logvar))
+
+        # generative
+        gen = self.generate(inference_mu_logvars=mu_logvars_inf)
+
+        return dict(
+            mu_logvars_inference=mu_logvars_inf,  # len(n_vae_layers)
+            mu_logvars_gen_prior=gen["mu_logvars_gen_prior"],  # len(n_vae_layers+1)
+            mu_logvars_gen=gen["mu_logvars_gen"],  # len(n_vae_layers+1)
+            sample_zs=gen["sample_zs"],  # len(n_vae_layers+1)
+        )
+
+    def generate(
+        self,
+        inference_mu_logvars: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        top_z: Optional[torch.Tensor] = None,
+        top_gen_prior_mu_logvar: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ):
+        assert (
+            inference_mu_logvars is not None
+            or top_z is not None
+            or top_gen_prior_mu_logvar is not None
+        ), "Must provide inference mu+logvar or top z or top generative prior mu+logvar"
+
+        assert (top_z is None) or (
+            top_gen_prior_mu_logvar is None
+        ), "If providing top z, top generative prior parameters are meaningless"
+
+        if top_z is not None:
+            mu_logvars_gen_prior = [(None, None)]
+            mu_logvars_gen = [(None, None)]
+            sample_zs = []
+        elif top_gen_prior_mu_logvar is not None:
+            mu_logvars_gen_prior = [top_gen_prior_mu_logvar]
+            mu_logvars_gen = []
+            sample_zs = []
+        else:
+            mu_logvars_gen_prior = [(None, None)]
+            mu_logvars_gen = []
+            sample_zs = []
+
+        for i, layer in reversed(list(enumerate(self.generative_layers))):
+            is_top_layer = i == len(self.generative_layers) - 1
+
+            if is_top_layer and top_z is not None:
+                z = top_z
+            else:
+                # get prior mu, logvar
+                mu_gen_prior, logvar_gen_prior = mu_logvars_gen_prior[0]
+
+                # get inference mu, logvar
+                mu_inf, logvar_inf = (
+                    inference_mu_logvars[i] if inference_mu_logvars is not None else (None, None)
+                )
+
+                if is_top_layer and mu_gen_prior is None and logvar_gen_prior is None:
+                    # if no prior, use inference
+                    mu, logvar = mu_inf, logvar_inf
+                elif mu_inf is None and logvar_inf is None:
+                    # if no inference (i.e. generation), use prior
+                    mu, logvar = mu_gen_prior, logvar_gen_prior
+                else:
+                    # combine inference and generative parameters by inverse variance weighting
+                    # TODO: there has to be a way to do this without exponentiation
+                    # also TODO: explore parametric combination methods (e.g. concat + linear transform)
+
+                    _var_inf = torch.exp(logvar_inf)
+                    _var_gen = torch.exp(logvar_gen_prior)
+
+                    var = 1 / (1 / _var_inf + 1 / _var_gen)
+                    mu = var * (mu_inf / _var_inf + mu_gen_prior / _var_gen)
+                    logvar = torch.log(var)
+
+                mu_logvars_gen.insert(0, (mu, logvar))
+                # generate sample
+                z = reparam_sample(mu, logvar)
+            sample_zs.insert(0, z)
+
+            # create next prior mu, logvar from sample
+            distribution = layer(z)
+            z_dim = int(distribution.size(1) / 2)
+            assert z_dim == (distribution.size(1) / 2), "Generative latent dimension should be even"
+            next_mu_gen_prior, next_logvar_gen_prior = (
+                distribution[:, :z_dim],
+                distribution[:, z_dim:],
+            )
+            mu_logvars_gen_prior.insert(0, (next_mu_gen_prior, next_logvar_gen_prior))
+
+        # sample patch
+        patch_mu_gen_prior, patch_logvar_gen_prior = mu_logvars_gen_prior[0]
+        mu_logvars_gen.insert(
+            0, (patch_mu_gen_prior, patch_logvar_gen_prior)
+        )  # image generated from prior
+        patch = reparam_sample(patch_mu_gen_prior, patch_logvar_gen_prior)
+        sample_zs.insert(0, patch)
+
+        assert (
+            len(mu_logvars_gen_prior)
+            == len(mu_logvars_gen)
+            == len(sample_zs)
+            == len(self.generative_layers) + 1
+        )
+
+        return dict(
+            mu_logvars_gen_prior=mu_logvars_gen_prior,  # len(n_vae_layers+1)
+            mu_logvars_gen=mu_logvars_gen,  # len(n_vae_layers+1)
+            sample_zs=sample_zs,  # len(n_vae_layers+1)
+        )
+
+        # for i, layer in reversed(list(enumerate(self.generative_layers))):
+        #     # iterate from the top layer down
+        #     is_top_layer = i == len(self.generative_layers) - 1
+        #     if is_top_layer:
+        #         if top_z is not None:
+        #             # if top z is provided, use that directly
+        #             mu_logvars_gen_prior.insert(0, (None, None))
+        #             mu_logvars_gen.insert(0, (None, None))
+        #             sample_zs.insert(0, top_z)
+        #             continue
+        #         elif top_gen_prior_mu_logvar is not None:
+        #             # if top generative prior mu+logvar is provided (e.g. for generation), use that
+        #             mu_gen_prior, logvar_gen_prior = top_gen_prior_mu_logvar
+        #         else:
+        #             mu_gen_prior, logvar_gen_prior = None, None
+        #     else:
+        #         gen_z_from_above = sample_zs[0]
+        #         distribution = layer(gen_z_from_above)
+        #         z_dim = int(distribution.size(1) / 2)
+        #         assert z_dim == (
+        #             distribution.size(1) / 2
+        #         ), "Generative latent dimension should be even"
+        #         mu_gen_prior, logvar_gen_prior = distribution[:, :z_dim], distribution[:, z_dim:]
+
+        #     if inference_mu_logvars is None:
+        #         # straight generation
+        #         mu, logvar = mu_gen_prior, logvar_gen_prior
+        #     elif is_top_layer and top_gen_prior_mu_logvar is None:
+        #         # if top z nor top prior is not provided, use inference mu+logvar as generative prior
+        #         mu, logvar = inference_mu_logvars[i]
+        #     else:
+        #         # combine inference and generative parameters by inverse variance weighting
+        #         # TODO: there has to be a way to do this without exponentiation
+        #         # also TODO: explore parametric combination methods (e.g. concat + linear transform)
+        #         mu_inf, logvar_inf = inference_mu_logvars[i]
+        #         _var_inf = torch.exp(logvar_inf)
+        #         _var_gen = torch.exp(logvar_gen_prior)
+
+        #         var = 1 / (1 / _var_inf + 1 / _var_gen)
+        #         mu = var * (mu_inf / _var_inf + mu_gen_prior / _var_gen)
+        #         logvar = torch.log(var)
+
+        #     # if is_top_layer:
+        #     #     assert torch.isclose(
+        #     #         mu, mu_inf
+        #     #     ).all(), "Top layer mu should be same as inference mu"
+        #     #     assert torch.isclose(
+        #     #         logvar, logvar_inf
+        #     #     ).all(), "Top layer logvar should be same as inference logvar"
+
+        #     # sample from combined distribution
+        #     z = reparam_sample(mu, logvar)
+
+        #     mu_logvars_gen_prior.insert(0, (mu_gen_prior, logvar_gen_prior))
+        #     mu_logvars_gen.insert(0, (mu, logvar))
+        #     sample_zs.insert(0, z)
 
 
-# class Sampler(nn.Module):
-#     def __init__(self):
-#         super.__init__()
+class NextPatchPredictor(nn.Module):
+    def __init__(self, ladder_vae: LadderVAE, z_dims: List[int], do_random_foveation: bool = False):
+        super().__init__()
 
-#     def forward(self, mu, logvar):
-#         return reparam_sample(mu, logvar)
+        self.ladder_vae = ladder_vae
+        self.z_dims = z_dims
+        self.do_random_foveation = do_random_foveation
+
+        self.top_z_predictor = VisionTransformer(
+            input_dim=z_dims[-1] + 2,  # 2 for concatenated next position
+            output_dim=z_dims[-1] * 2,
+            embed_dim=32,  # TODO
+            hidden_dim=64,  # TODO
+            num_heads=1,  # TODO
+            num_layers=1,  # TODO
+            dropout=0,
+        )
+
+        self.next_location_predictor = VisionTransformer(
+            input_dim=z_dims[-1],
+            output_dim=2 * 2,
+            embed_dim=32,  # TODO
+            hidden_dim=64,  # TODO
+            num_heads=1,  # TODO
+            num_layers=1,  # TODO
+            dropout=0,
+        )
+
+    def forward(
+        self,
+        patch_step_zs: List[List[torch.Tensor]],
+        forced_next_location: torch.Tensor = None,
+        randomize_next_location: bool = False,
+    ):
+        # patch_step_zs: list(n_steps_so_far) of lists (n_levels from lowest to highest) of tensors (b, dim)
+        # highest-level z is the last element of the list
+
+        n_steps = len(patch_step_zs)
+        n_levels = len(patch_step_zs[0])
+        top_zs = [patch_step_zs[i][-1] for i in range(n_steps)]
+        b = top_zs[0].size(0)
+        device = top_zs[0].device
+
+        if forced_next_location is not None:
+            next_pos, next_pos_mu, next_pos_logvar = forced_next_location, None, None
+        elif self.do_random_foveation or randomize_next_location:
+            next_pos, next_pos_mu, next_pos_logvar = (
+                self._get_random_foveation_pos(b, device=device),
+                None,
+                None,
+            )
+        else:
+            next_pos, next_pos_mu, next_pos_logvar = self.pred_next_location(patch_step_zs)
+
+        next_patch_gen_dict = self.generate_next_patch_zs(patch_step_zs, next_pos)
+
+        return dict(
+            generation=next_patch_gen_dict,
+            position=dict(
+                next_pos=next_pos,
+                next_pos_mu=next_pos_mu,
+                next_pos_logvar=next_pos_logvar,
+            ),
+        )
+
+    def pred_next_location(self, patch_step_zs: List[List[torch.Tensor]]):
+        Z_LEVEL_TO_PRED_LOC = -1  # TODO: make this a param, and maybe multiple levels
+
+        prev_top_zs = self._get_zs_from_level(patch_step_zs, Z_LEVEL_TO_PRED_LOC)
+        pred = self.next_location_predictor(prev_top_zs)
+        next_loc_mu, next_loc_logvar = pred[:, :2], pred[:, 2:]
+        next_loc = reparam_sample(next_loc_mu, next_loc_logvar)
+
+        return (
+            torch.clamp(next_loc, -1, 1),
+            next_loc_mu,
+            next_loc_logvar,
+        )
+
+    def generate_next_patch_zs(
+        self, patch_step_zs: List[List[torch.Tensor]], next_loc: torch.Tensor
+    ):
+        n_steps = len(patch_step_zs)
+        n_levels = len(patch_step_zs[0])
+        b = patch_step_zs[0][0].size(0)
+        assert next_loc.size() == torch.Size([b, 2]), "next_loc should be (b, 2)"
+
+        Z_LEVEL_TO_PRED_PATCH = -1
+
+        prev_top_zs = self._get_zs_from_level(patch_step_zs, Z_LEVEL_TO_PRED_PATCH)
+        # concatenate next patch pos to each z, TODO: maybe add as extra token instead?
+        prev_top_zs_with_pos = torch.cat(
+            (prev_top_zs, next_loc.unsqueeze(1).repeat(1, n_steps, 1)),
+            dim=2,
+        )
+
+        next_top_z_pred = self.top_z_predictor(prev_top_zs_with_pos)
+        next_top_z_mu, next_top_z_logvar = (
+            next_top_z_pred[:, : self.z_dims[-1]],
+            next_top_z_pred[:, self.z_dims[-1] :],
+        )
+        # next_top_z = reparam_sample(next_top_z_mu, next_top_z_logvar)
+
+        next_patch_gen_dict = self.ladder_vae.generate(
+            top_gen_prior_mu_logvar=(next_top_z_mu, next_top_z_logvar)
+        )
+
+        return next_patch_gen_dict
+
+    def _get_zs_from_level(self, patch_step_zs: List[List[torch.Tensor]], level: int):
+        s = torch.stack([zs[level] for zs in patch_step_zs], dim=0)
+        s = s.transpose(0, 1)  # (b, n_steps, dim)
+        return s
+
+    def _get_random_foveation_pos(self, batch_size: int, device: torch.device = None):
+        return torch.rand((batch_size, 2), device=device) * 2 - 1
+
+
+# def zip_reverse(*iterables):
+#     return zip(*[reversed(g) for g in iterables])
+
+
+# class UpBlock(nn.Module):
+#     def __init__(self, from_sample_dim, to_z_dim, hidden_ff_out_dims=None):
+#         super().__init__()
+#         self.out_z_dim = to_z_dim
+
+#         if not hidden_ff_out_dims:
+#             hidden_ff_out_dims = []
+
+#         # if no hidden dims provided, will contain just z dim (*2 bc mean and logvar)
+#         hidden_ff_out_dims = [*hidden_ff_out_dims, to_z_dim * 2]
+
+#         stack = []
+#         last_out_dim = from_sample_dim
+#         for nn_out_dim in hidden_ff_out_dims:
+#             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
+#             last_out_dim = nn_out_dim
+
+#         self.encoder = nn.Sequential(View((-1, from_sample_dim)), *stack)
+
+#     def forward(self, x):
+#         distributions = self.encoder(x)
+#         mu = distributions[:, : self.out_z_dim]
+#         logvar = distributions[:, self.out_z_dim :]
+#         return mu, logvar
+
+
+# class DownBlock(nn.Module):
+#     def __init__(self, from_dim, to_dim, hidden_ff_out_dims=None):
+#         super().__init__()
+
+#         if not hidden_ff_out_dims:
+#             hidden_ff_out_dims = []
+
+#         # if no hidden dims provided, will contain just to_dim
+#         hidden_ff_out_dims = [*hidden_ff_out_dims, to_dim]
+
+#         stack = []
+#         last_out_dim = from_dim
+#         for nn_out_dim in hidden_ff_out_dims:
+#             stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
+#             last_out_dim = nn_out_dim
+
+#         self.decoder = nn.Sequential(View((-1, from_dim)), *stack)
+
+#     def forward(self, x):
+#         return self.decoder(x)
 
 
 class FoVAE(pl.LightningModule):
@@ -150,36 +533,17 @@ class FoVAE(pl.LightningModule):
 
         input_dim = self.patch_dim * self.patch_dim * self.num_channels
 
-        self.encoders = nn.ModuleList([UpBlock(input_dim, z_dim, [256, 256])])
-        self.decoders = nn.ModuleList([DownBlock(z_dim, input_dim, [256, 256])])
+        VAE_LADDER_DIMS = [25]
+        VAE_Z_DIMS = [z_dim]
 
-        # for all levels except the highest-level next-patch-z predictor, the predictors are
-        # DownBlocks analogous to the decoders
-        # for highest-level next-patch-z predictor, the predictor is a Transformer conditioned on
-        # all past top-level Zs
-        self.next_patch_predictors = nn.ModuleList(
-            [
-                VisionTransformer(
-                    input_dim=z_dim + 2,  # 2 for concatenated next position
-                    output_dim=z_dim,
-                    embed_dim=32,  # TODO
-                    hidden_dim=64,  # TODO
-                    num_heads=1,  # TODO
-                    num_layers=1,  # TODO
-                    dropout=0,
-                ),
-                DownBlock(z_dim * 2 if do_z_pred_cond_from_top else z_dim, input_dim),
-            ]
+        self.ladder = Ladder(input_dim, VAE_LADDER_DIMS, [[256, 256]])
+        self.ladder_vae = LadderVAE(
+            input_dim, VAE_LADDER_DIMS, VAE_Z_DIMS, [[256, 256]], [[256, 256]]
         )
-
-        self.next_location_predictor = VisionTransformer(
-            input_dim=z_dim,
-            output_dim=2 * 2,
-            embed_dim=32,  # TODO
-            hidden_dim=64,  # TODO
-            num_heads=1,  # TODO
-            num_layers=1,  # TODO
-            dropout=0,
+        self.next_patch_predictor = NextPatchPredictor(
+            ladder_vae=self.ladder_vae,
+            z_dims=VAE_Z_DIMS,
+            do_random_foveation=do_random_foveation,
         )
 
         self._beta = beta
@@ -199,9 +563,10 @@ class FoVAE(pl.LightningModule):
         self.betas = dict(
             curr_patch_recon=1,
             curr_patch_kl=beta_vae,
-            next_patch_recon=100,
-            next_patch_pos_kl=10,
-            image_recon=100,
+            next_patch_pos_kl=0,
+            next_patch_recon=1,
+            next_patch_kl=beta_vae,
+            image_recon=1,
         )
 
         # image: (b, c, image_dim[0], image_dim[1])
@@ -231,42 +596,20 @@ class FoVAE(pl.LightningModule):
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         b, c, h, w = x.size()
 
-        # if self.do_add_pos_encoding:
         x_full = self._add_pos_encodings_to_img_batch(x)
-        # else:
-        #     x_full = x
 
-        curr_patch_total_loss, curr_patch_rec_total_loss, curr_patch_total_kl_div = (
-            0.0,
-            0.0,
-            0.0,
+
+        curr_patch_rec_total_loss = 0.0
+        curr_patch_kl_div_total_loss = 0.0
+        next_patch_pos_kl_div_total_loss = 0.0
+        next_patch_rec_total_loss = 0.0
+        next_patch_kl_div_total_loss = 0.0
+        image_reconstruction_loss = 0.0
+        curr_patch_kl_divs_by_layer, next_patch_rec_losses_by_layer, next_patch_kl_divs_by_layer = (
+            [],
+            [],
+            [],
         )
-        next_patch_z_pred_total_loss = 0.0
-        next_patch_pos_kl_div = 0.0
-        # next_patch_total_loss, next_patch_rec_loss, next_patch_kl_div = (
-        #     0.0,
-        #     0.0,
-        #     0.0,
-        # )
-
-        # patches: (b, patch_dim*patch_dim, c, h_out, w_out)
-        # patch_locs_x = torch.linspace(-1, 1, 30)
-        # patch_locs_y = torch.linspace(-1, 1, 30)
-        # patches = [self._foveate_to_loc(x_full, loc)[0] for loc in torch.cartesian_prod(patch_locs_x, patch_locs_y)]
-        # patch_vis = torchvision.utils.make_grid(patches, nrow=len(patch_locs_x), pad_value=1).cpu()
-        # plt.imshow(patch_vis.permute(1, 2, 0) / 2 + 0.5)
-
-        # def get_next_patch(curr_patch: torch.Tensor, curr_zs: torch.Tensor):
-        #     curr_pos = curr_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)[
-        #         :, -2:, :, :
-        #     ].mean(dim=(2, 3))
-        #     # move pos in random direction a small amount
-        #     next_pos = curr_pos + torch.randn_like(curr_pos) * 0.1
-        #     # clamp to [-1, 1]
-        #     next_pos = torch.clamp(next_pos, -1, 1)
-        #     # get next patch
-        #     next_patch = get_patch_from_pos(next_pos)
-        #     return next_patch, next_pos
 
         def get_patch_from_pos(pos):
             # TODO: investigate why reshape vs. view is needed
@@ -276,69 +619,100 @@ class FoVAE(pl.LightningModule):
 
         initial_positions = torch.tensor([0.0, 0.0], device=x.device).unsqueeze(0).repeat(b, 1)
         patches = [get_patch_from_pos(initial_positions)]
-        sample_zs = []
-        pred_sample_zs = []
-        z_mus = []
-        z_logvars = []
-        z_recons = []
         patch_positions = [initial_positions]
+
+        real_patch_zs = []
+        real_patch_dicts = []
+
+        gen_patch_zs = []
+        gen_patch_dicts = []
+
         for step in range(self.n_steps):
             curr_patch = patches[-1]
-            curr_sample_zs, curr_z_mus, curr_z_logvars = self._encode_patch(curr_patch)
+            curr_patch_dict = self._process_patch(curr_patch)
+            # curr_patch_dict:
+            #   mu_logvars_inference: list(n_vae_layers) of (mu, logvar) tuples, each (b, z_dim)
+            #   mu_logvars_gen_prior: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
+            #   mu_logvars_gen: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
+            #   sample_zs: list(n_vae_layers+1) of (b, z_dim)
+            # each list is in order from bottom to top. gen lists and sample_zs have input-level at index 0
+            assert torch.is_same_size(curr_patch, curr_patch_dict["sample_zs"][0])
+            real_patch_zs.append(curr_patch_dict["sample_zs"])
+            real_patch_dicts.append(curr_patch_dict)
 
-            # if any previous predicted patch, calculate loss between current patch and previous predicted patch
-            if self.do_next_patch_prediction and len(pred_sample_zs) > 0:
-                prev_pred_sample_zs = pred_sample_zs[-1]
-                for i in range(len(prev_pred_sample_zs)):
-                    next_patch_z_pred_total_loss += F.mse_loss(
-                        prev_pred_sample_zs[i], curr_sample_zs[i]
-                    )
-
-            # reconstruct current patch
-            curr_z_recons = self._decode_patch(curr_sample_zs[-1])  # decode from top-level z
-            curr_patch_recon = curr_z_recons[-1]
-            assert torch.is_same_size(curr_patch_recon, curr_patch)
-
-            # TODO: loss on all levels
-            _curr_patch_rec_loss, _curr_patch_kl_div = self._loss(
-                curr_patch, curr_patch_recon, curr_z_mus[-1], curr_z_logvars[-1]
-            )
-            # curr_patch_total_loss += _curr_patch_total_loss
-            curr_patch_rec_total_loss += _curr_patch_rec_loss
-            curr_patch_total_kl_div += _curr_patch_kl_div
-
-            sample_zs.append(curr_sample_zs)
-            z_mus.append(curr_z_mus)
-            z_logvars.append(curr_z_logvars)
-            z_recons.append(curr_z_recons)
-
-            (
-                next_patch_sample_pos,
-                next_patch_pos_mus,
-                next_patch_pos_logvars,
-            ) = self._predict_next_patch_loc(sample_zs)
-            # calculate kl divergence between predicted next patch pos and std-normal prior
-            # only do kl divergence because reconstruction of next_pos is captured in next_patch_rec_loss
-            if not self.do_random_foveation:
-                _, _next_patch_pos_kl_div = self._loss(
-                    mu=next_patch_pos_mus, logvar=next_patch_pos_logvars
+            if self.do_next_patch_prediction:
+                next_patch_dict = self._gen_next_patch(
+                    real_patch_zs, randomize_next_location=self.do_random_foveation
                 )
-                next_patch_pos_kl_div += _next_patch_pos_kl_div
-            patch_positions.append(next_patch_sample_pos)
+                # next_patch_dict:
+                #   generation:
+                #       mu_logvars_gen_prior: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
+                #       mu_logvars_gen: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
+                #       sample_zs: list(n_vae_layers+1) of (b, z_dim)
+                #   position:
+                #       next_pos: (b, 2)
+                #       next_pos_mu: (b, 2)
+                #       next_pos_logvar: (b, 2)
+                gen_patch_zs.append(next_patch_dict["generation"]["sample_zs"])
+                gen_patch_dicts.append(next_patch_dict)
 
-            # predict zs for next patch
-            pred_next_zs = self._predict_next_patch_zs(sample_zs, next_patch_sample_pos)
-            pred_sample_zs.append(pred_next_zs)
-            pred_next_patch = pred_next_zs[0]  # analogous to curr_sample_zs[0]
-            pred_next_patch_pos = pred_next_patch.view(
-                b, self.num_channels, self.patch_dim, self.patch_dim
-            )[:, -2:, :, :].mean(dim=(2, 3))
-            # clamp to [-1, 1]
-            pred_next_patch_pos = torch.clamp(pred_next_patch_pos, -1, 1)
+                next_pos = next_patch_dict["position"]["next_pos"]
+            elif self.do_random_foveation:
+                next_pos = self._get_random_foveation_pos(batch_size=b)
+            else:
+                raise ValueError("Must do either next patch prediction or random foveation")
 
             # foveate to next position
-            next_patch = get_patch_from_pos(next_patch_sample_pos)
+            next_patch = get_patch_from_pos(next_pos)
             assert torch.is_same_size(next_patch, curr_patch)
+            patches.append(next_patch)
+            patch_positions.append(next_pos)
+
+            # calculate losses
+
+            # calculate rec and kl losses for current patch
+            _curr_patch_rec_loss = -1 * gaussian_likelihood(
+                curr_patch, curr_patch_dict["sample_zs"][0]
+            )
+            _curr_patch_kl_divs = []
+            for mu, logvar in curr_patch_dict["mu_logvars_gen"]:
+                _curr_patch_kl_divs.append(gaussian_kl_divergence(mu=mu, logvar=logvar))
+
+            # calculate kl divergence between predicted next patch pos and std-normal prior
+            # only do kl divergence because reconstruction of next_pos is captured in next_patch_rec_loss
+            _next_patch_pos_kl_div = 0.0
+            if not self.do_random_foveation:
+                _next_patch_pos_kl_div = gaussian_kl_divergence(
+                    mu=next_patch_dict["position"]["next_pos_mu"],
+                    logvar=next_patch_dict["position"]["next_pos_logvar"],
+                )
+
+            # if any previous predicted patch, calculate loss between current patch and previous predicted patch
+            _next_patch_rec_losses, _next_patch_kl_divs = [], []
+            if self.do_next_patch_prediction and len(gen_patch_zs) > 1:
+                # -2 because -1 is the current step, and -2 is the previous step
+                prev_step_gen_sample_zs = gen_patch_zs[-2]
+                _next_patch_rec_losses, _next_patch_kl_divs = [], []
+                for i in range(len(prev_step_gen_sample_zs)):
+                    _next_patch_rec_losses.append(
+                        -1
+                        * gaussian_likelihood(
+                            curr_patch_dict["sample_zs"][i], prev_step_gen_sample_zs[i]
+                        )
+                    )
+                    _next_patch_kl_divs.append(
+                        gaussian_kl_divergence(
+                            mu=next_patch_dict["generation"]["mu_logvars_gen"][i][0],
+                            logvar=next_patch_dict["generation"]["mu_logvars_gen"][i][1],
+                        )
+                    )
+                next_patch_rec_losses_by_layer.append(torch.stack(_next_patch_rec_losses, dim=0))
+                next_patch_kl_divs_by_layer.append(torch.stack(_next_patch_kl_divs, dim=0))
+
+            # aggregate losses
+            curr_patch_rec_total_loss += _curr_patch_rec_loss
+            curr_patch_kl_divs_by_layer.append(torch.stack(_curr_patch_kl_divs, dim=0))
+            next_patch_pos_kl_div_total_loss += _next_patch_pos_kl_div
 
             # check that the next patch's position is close to the position from which
             # it was supposed to be extracted
@@ -362,11 +736,9 @@ class FoVAE(pl.LightningModule):
             #     f"{(_next_patch_center - next_patch_sample_pos).abs().max()} > {_acceptable_dist_threshold}"
             # )
 
-            patches.append(next_patch)
-
         if self.do_image_reconstruction:
             image_reconstruction_loss, _ = self._reconstruct_image(
-                sample_zs, x_full, return_patches=False
+                real_patch_zs, x_full, return_patches=False
             )
         else:
             image_reconstruction_loss = torch.tensor(0.0, device=self.device)
@@ -377,51 +749,76 @@ class FoVAE(pl.LightningModule):
         # https://github.com/pytorch/pytorch/issues/13246
         # https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/
 
-        curr_patch_rec_total_loss = (
-            curr_patch_rec_total_loss * self.betas["curr_patch_recon"] / self.n_steps
-        )
-        curr_patch_total_kl_div = (
-            curr_patch_total_kl_div * self.betas["curr_patch_kl"] / self.n_steps
-        )
-        next_patch_z_pred_total_loss = (
-            next_patch_z_pred_total_loss * self.betas["next_patch_recon"] / self.n_steps
-        )
-        next_patch_pos_kl_div = (
-            next_patch_pos_kl_div * self.betas["next_patch_pos_kl"] / self.n_steps
-        )
-        image_reconstruction_loss = image_reconstruction_loss * self.betas["image_recon"]
+        # aggregate losses across steps
+        # mean over steps
+        curr_patch_kl_divs_by_layer = torch.stack(curr_patch_kl_divs_by_layer, dim=0).mean(dim=0)
+        if self.do_next_patch_prediction:
+            next_patch_rec_losses_by_layer = torch.stack(
+                next_patch_rec_losses_by_layer, dim=0
+            ).mean(dim=0)
+            next_patch_kl_divs_by_layer = torch.stack(next_patch_kl_divs_by_layer, dim=0).mean(
+                dim=0
+            )
 
-        # curr_patch_total_loss = curr_patch_rec_total_loss + self.beta * curr_patch_total_kl_div
+        curr_patch_rec_total_loss = (
+            self.betas["curr_patch_recon"] * curr_patch_rec_total_loss / self.n_steps
+        )
+        # sum over layers (already mean over steps)
+        curr_patch_kl_div_total_loss = (
+            self.betas["curr_patch_kl"] * curr_patch_kl_divs_by_layer.sum()
+        )
+        next_patch_pos_kl_div_total_loss = (
+            self.betas["next_patch_pos_kl"] * next_patch_pos_kl_div_total_loss / self.n_steps
+        )
+        # sum over layers (already mean over steps)
+        if self.do_next_patch_prediction:
+            next_patch_rec_total_loss = (
+                self.betas["next_patch_recon"] * next_patch_rec_losses_by_layer.sum()
+            )
+            next_patch_kl_div_total_loss = (
+                self.betas["next_patch_kl"] * next_patch_kl_divs_by_layer.sum()
+            )
+
+        image_reconstruction_loss = self.betas["image_recon"] * image_reconstruction_loss
 
         total_loss = (
             curr_patch_rec_total_loss
-            + curr_patch_total_kl_div
-            + next_patch_z_pred_total_loss
-            + next_patch_pos_kl_div
+            + curr_patch_kl_div_total_loss
+            + next_patch_pos_kl_div_total_loss
+            + next_patch_rec_total_loss
+            + next_patch_kl_div_total_loss
             + image_reconstruction_loss
         )
 
         return dict(
             losses=dict(
                 total_loss=total_loss,
-                curr_patch_total_loss=curr_patch_rec_total_loss + curr_patch_total_kl_div,
+                curr_patch_total_loss=curr_patch_rec_total_loss + curr_patch_kl_div_total_loss,
                 curr_patch_rec_loss=curr_patch_rec_total_loss,
-                curr_patch_kl_div=curr_patch_total_kl_div,
-                next_patch_z_pred_total_loss=next_patch_z_pred_total_loss,
-                next_patch_pos_kl_div=next_patch_pos_kl_div,
+                curr_patch_kl_loss=curr_patch_kl_div_total_loss,
+                next_patch_pos_kl_loss=next_patch_pos_kl_div_total_loss,
+                next_patch_rec_loss=next_patch_rec_total_loss,
+                next_patch_kl_loss=next_patch_kl_div_total_loss,
                 image_reconstruction_loss=image_reconstruction_loss,
             ),
+            losses_by_layer=dict(
+                curr_patch_kl_divs_by_layer=curr_patch_kl_divs_by_layer,  # n_levels
+                next_patch_rec_losses_by_layer=next_patch_rec_losses_by_layer,  # n_levels
+                next_patch_kl_divs_by_layer=next_patch_kl_divs_by_layer,  # n_levels
+            ),
             step_vars=dict(
-                # all except last are a list of length n_steps, each element is a list of length n_levels
-                sample_zs=sample_zs,
-                curr_z_mus=curr_z_mus,
-                curr_z_logvars=curr_z_logvars,
-                z_recons=z_recons,
-                pred_sample_zs=pred_sample_zs,
-                patch_positions=patch_positions,  # list of length n_steps, each element is a tensor of shape (b, 2)
+                patches=patches,  # n_steps x (b, n_channels, patch_dim, patch_dim)
+                patch_positions=patch_positions,  # n_steps x (b, 2)
+                real_patch_zs=real_patch_zs,  # n_steps x n_levels x (b, z_dim)
+                real_patch_dicts=real_patch_dicts,  # n_steps x n_levels x dict
+                gen_patch_zs=gen_patch_zs,  # n_steps x n_levels x (b, z_dim)
+                gen_patch_dicts=gen_patch_dicts  # n_steps x n_levels x dict
                 # image_reconstruction_patches=image_reconstruction_patches,  # (b, n_patches, n_channels, patch_dim, patch_dim)
             ),
         )
+
+    def _get_random_foveation_pos(self, batch_size: int):
+        return self.next_patch_predictor._get_random_foveation_pos(batch_size, device=self.device)
 
     def _reconstruct_image(self, sample_zs, image: Optional[torch.Tensor], return_patches=False):
         # positions span [-1, 1] in both x and y
@@ -439,23 +836,23 @@ class FoVAE(pl.LightningModule):
 
         # predict zs for each position
         image_recon_loss = None
-        pred_zs = [*sample_zs]
+        gen_zs = [*sample_zs]
         patches = []
         # TODO: maybe reconstruct only some patches?
         for position in positions:
-            pred_step_zs = self._predict_next_patch_zs(pred_zs, position)
-            # pred_zs.append(pred_step_zs)
-            pred_patch = pred_step_zs[0]
-            pred_patch = pred_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)
+            gen_dict = self._gen_next_patch(gen_zs, forced_next_location=position)
+            gen_patch = gen_dict["generation"]["sample_zs"][0]
+            # gen_zs.append(gen_dict["generation"]["sample_zs"])
+            gen_patch = gen_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)
             if image is not None:
                 if image_recon_loss is None:
                     image_recon_loss = 0.0
                 real_patch = self._foveate_to_loc(image, position)  # SLOWWWWW
-                assert torch.is_same_size(pred_patch, real_patch)
+                assert torch.is_same_size(gen_patch, real_patch)
                 # TODO: mask to fovea only
-                patch_recon_loss = F.mse_loss(pred_patch, real_patch)
+                patch_recon_loss = -1 * gaussian_likelihood(real_patch, gen_patch)
                 image_recon_loss += patch_recon_loss
-            patches.append(pred_patch)
+            patches.append(gen_patch)
 
         if image_recon_loss is not None:
             image_recon_loss /= positions.size(0)
@@ -464,63 +861,6 @@ class FoVAE(pl.LightningModule):
             return image_recon_loss, torch.stack(patches, dim=0).transpose(0, 1)
         else:
             return image_recon_loss, None
-
-    def _loss(
-        self,
-        x: Optional[torch.Tensor] = None,
-        x_recon: Optional[torch.Tensor] = None,
-        # z: Optional[torch.Tensor] = None,
-        mu: Optional[torch.Tensor] = None,
-        logvar: Optional[torch.Tensor] = None,
-    ):
-        """
-        Calculate Gaussian likelihood + KL divergence for an arbitrary input.
-        If x and x_recon are provided, Gaussian likelihood loss is calculated.
-        If mu and logvar are provided, KL divergence loss from standard-normal prior is calculated.
-        If both are provided, both losses are calculated and summed weighted by self.beta.
-
-        Args:
-            x: input
-            x_recon: reconstruction of input
-            mu: latent mean
-            logvar: latent log variance
-
-        Returns:
-            loss: beta-weighted sum of Gaussian likelihood and KL divergence losses, if both are calculated
-            recon_loss: Gaussian likelihood loss, if calculated
-            kl: KL divergence loss, if calculated
-        """
-        recon_loss, kl = None, None
-
-        if (x is None and x_recon is None) and (mu is None and logvar is None):
-            raise ValueError(
-                "Must provide either x and x_recon (for likelihood loss) or mu and logvar (for KL divergence loss)"
-            )
-
-        if (x is not None and x_recon is None) or (x is None and x_recon is not None):
-            raise ValueError("Must provide both x and x_recon for likelihood loss")
-        else:
-            try:
-                # can error due to bad predictions
-                recon_loss = -gaussian_likelihood(x, x_recon, 0.0).mean()
-            except ValueError as e:
-                recon_loss = torch.nan
-
-        if (mu is not None and logvar is None) or (mu is None and logvar is not None):
-            raise ValueError("Must provide both mu and logvar for KL divergence loss")
-        else:
-            try:
-                std = torch.exp(logvar / 2)
-                kl = gaussian_kl_divergence(mu, std).mean()
-            except ValueError as e:
-                kl = torch.nan
-
-        # total_loss = (
-        #     (self.beta * kl + recon_loss) if recon_loss is not None and kl is not None else None
-        # )
-
-        # maximize reconstruction likelihood (minimize its negative), minimize kl divergence
-        return recon_loss, kl
 
     def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor):
         # image: (b, c, h, w)
@@ -611,109 +951,26 @@ class FoVAE(pl.LightningModule):
 
         return gaussian_filter_params
 
-    def _encode_patch(self, x: torch.Tensor):
-        mus, logvars, zs = [None], [None], [x]
-        for encoder in self.encoders:
-            z_mu, z_logvar = encoder(zs[-1])
-            z = reparam_sample(z_mu, z_logvar)
-            mus.append(z_mu)
-            logvars.append(z_logvar)
-            zs.append(z)
-        return zs, mus, logvars
+    def _process_patch(self, x: torch.Tensor):
+        ladder_outputs = self.ladder(x)
+        patch_vae_dict = self.ladder_vae(ladder_outputs)
+        return patch_vae_dict
 
-    def _decode_patch(self, z, z_level=None):
-        decodings = [z]
-
-        if z_level is not None:
-            decoders = self.decoders[-z_level:]
-        else:
-            decoders = self.decoders
-
-        # iterate decoders from highest level to lowest
-        for decoder in decoders:
-            dec = decoder(decodings[-1])
-            decodings.append(dec)
-
-        # decodings[-1] = decodings[-1].reshape(
-        #     (-1, self.num_channels, self.patch_dim, self.patch_dim)
-        # )
-
-        return decodings
-
-    def _predict_next_patch_loc(self, prev_zs: List[List[torch.Tensor]]):
-        # prev_zs: list(n_steps_so_far) of lists (n_levels from lowest to highest) of tensors (b, dim)
-        # highest-level z is the last element of the list
-
-        Z_LEVEL_TO_PRED_LOC = -1  # TODO: make this a param, and maybe multiple levels
-
-        if self.do_random_foveation:
-            return torch.rand((prev_zs[0][0].size(0), 2), device=prev_zs[0][0].device) * 2 - 1, None, None
-
-        else:
-            prev_top_zs = torch.stack([zs[Z_LEVEL_TO_PRED_LOC] for zs in prev_zs], dim=0)
-            prev_top_zs = prev_top_zs.transpose(0, 1)  # (b, n_steps, dim)
-            pred = self.next_location_predictor(prev_top_zs)
-            next_loc_mu, next_loc_logvar = pred[:, :2], pred[:, 2:]
-            next_loc = reparam_sample(next_loc_mu, next_loc_logvar)
-
-            return (
-                # F.sigmoid(next_loc)*2 - 1,
-                torch.clamp(next_loc, -1, 1),
-                next_loc_mu,
-                next_loc_logvar,
-            )
-
-    def _predict_next_patch_zs(
-        self, prev_zs: List[List[torch.Tensor]], next_patch_pos: torch.Tensor
+    def _gen_next_patch(
+        self,
+        prev_zs: List[List[torch.Tensor]],
+        forced_next_location: Optional[torch.Tensor] = None,
+        randomize_next_location: bool = False,
     ):
         # prev_zs: list(n_steps_so_far) of lists (n_levels from lowest to highest) of tensors (b, dim)
         # next_patch_pos: Tensor (b, 2)
         # highest-level z is the last element of the list
 
-        # TODO: should these be sampled (i.e. predict + sample from mu+logvar) instead of predicted?
-        # I don't think so because trying to be analogous to the decoder, which doesn't sample
-
-        next_zs = []
-
-        N_LEVELS = 1 + 1
-        for i, predictor in enumerate(self.next_patch_predictors):
-            z_level_to_predict = N_LEVELS - i - 1
-            if z_level_to_predict == N_LEVELS - 1:
-                # predict next highest-level z using special Transformer procedure
-                # concat all previous top-level zs
-
-                # # add next patch pos as extra token
-                # # TODO: maybe add concatenate it to all tokens instead?
-                # pos_as_token = torch.zeros_like(prev_zs[0][-1])
-                # pos_as_token[:, :2] = next_patch_pos
-
-                prev_top_zs = torch.stack([zs[-1] for zs in prev_zs], dim=0)
-                prev_top_zs = prev_top_zs.transpose(0, 1)  # (b, n_steps, dim)
-
-                # concatenate next patch pos to each z, TODO: maybe add as extra token instead?
-                prev_top_zs_with_pos = torch.cat(
-                    (prev_top_zs, next_patch_pos.unsqueeze(1).repeat(1, prev_top_zs.size(1), 1)),
-                    dim=2,
-                )
-
-                pred_z = self.next_patch_predictors[0](prev_top_zs_with_pos)
-            else:
-                # predict next z using previous z
-
-                # TODO: condition on previous z of the same level?
-                # prev_same_level_z = prev_zs[-1][z_level_to_predict]
-                prev_higher_level_z = prev_zs[-1][z_level_to_predict + 1]
-                x = prev_higher_level_z
-                # condition on current predicted z of higher level?
-                if self.do_z_pred_cond_from_top:
-                    curr_higher_level_pred_z = next_zs[0]  # 0 because prepended
-                    x = torch.cat((x, curr_higher_level_pred_z), dim=1)
-
-                pred_z = predictor(x)
-
-            next_zs = [pred_z] + next_zs  # prepend to match order of prev_zs
-
-        return next_zs
+        return self.next_patch_predictor(
+            prev_zs,
+            forced_next_location=forced_next_location,
+            randomize_next_location=randomize_next_location,
+        )
 
     def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
         b, c, h, w = x.size()
@@ -735,15 +992,15 @@ class FoVAE(pl.LightningModule):
     #     with torch.no_grad():
     #         return self._decode_patch(z)[-1].cpu()
 
-    # returns z for position-augmented patch
-    def get_patch_zs(self, patch_with_pos: torch.Tensor):
-        assert patch_with_pos.ndim == 4
-        self.eval()
+    # # returns z for position-augmented patch
+    # def get_patch_zs(self, patch_with_pos: torch.Tensor):
+    #     assert patch_with_pos.ndim == 4
+    #     self.eval()
 
-        with torch.no_grad():
-            zs, mus, logvars = self._encode_patch(patch_with_pos)
+    #     with torch.no_grad():
+    #         zs, mus, logvars = self._encode_patch(patch_with_pos)
 
-        return zs
+    #     return zs
 
     # def linear_interpolate(self, im1, im2):
     #     self.eval()
@@ -761,7 +1018,13 @@ class FoVAE(pl.LightningModule):
 
     #     return result
 
-    def latent_traverse(self, z, z_level=1, range_limit=3, step=0.5, around_z=False):
+    def generate_patch_from_z(self, z, z_level=-1):
+        if z_level != -1:
+            raise NotImplementedError("Only z_level=-1 is supported for now")
+        with torch.no_grad():
+            return self.ladder_vae.generate(top_z=z)
+
+    def latent_traverse(self, z, z_level=-1, range_limit=3, step=0.5, around_z=False):
         self.eval()
         interpolation = torch.arange(-range_limit, range_limit + 0.1, step)
         samples = []
@@ -775,8 +1038,10 @@ class FoVAE(pl.LightningModule):
                         interp_z[:, row] += val
                     else:
                         interp_z[:, row] = val
+
+                    gen_dict = self.generate_patch_from_z(interp_z.to(self.device), z_level=z_level)
                     sample = (
-                        self._decode_patch(interp_z.to(self.device), z_level=z_level)[-1]
+                        gen_dict["sample_zs"][0]
                         .data.cpu()
                         .reshape(z.shape[0], self.num_channels, self.patch_dim, self.patch_dim)
                     )
@@ -787,24 +1052,14 @@ class FoVAE(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         forward_out = self.forward(x, y)
+        # total_loss = forward_out["losses"].pop("total_loss")
         total_loss = forward_out["losses"]["total_loss"]
-        curr_patch_total_loss = forward_out["losses"]["curr_patch_total_loss"]
-        curr_patch_rec_loss = forward_out["losses"]["curr_patch_rec_loss"]
-        curr_patch_kl_div = forward_out["losses"]["curr_patch_kl_div"]
-        next_patch_z_pred_total_loss = forward_out["losses"]["next_patch_z_pred_total_loss"]
-        next_patch_pos_kl_div = forward_out["losses"]["next_patch_pos_kl_div"]
-        image_reconstruction_loss = forward_out["losses"]["image_reconstruction_loss"]
-
-        self.log("train_total_loss", total_loss)
-        self.log("train_curr_patch_total_loss", curr_patch_total_loss)
-        self.log("train_next_patch_zpred_total_loss", next_patch_z_pred_total_loss)
-        self.log("train_curr_patch_rec_loss", curr_patch_rec_loss, prog_bar=True)
-        self.log("train_curr_patch_kl_div", curr_patch_kl_div, prog_bar=True)
-        self.log("train_next_patch_pos_kl_div", next_patch_pos_kl_div)
-        self.log("train_image_recon_loss", image_reconstruction_loss)
+        # self.log("train_total_loss", total_loss, prog_bar=True)
+        self.log_dict({"train_" + k: v for k, v in forward_out["losses"].items()})
 
         # self._optimizer_step(loss)
-        skip_update = float(torch.isnan(total_loss))  # TODO: skip on grad norm
+        # TODO: skip on grad norm
+        skip_update = float(torch.isnan(total_loss))
         if skip_update:
             print(f"Skipping update!", forward_out["losses"])
 
@@ -825,38 +1080,34 @@ class FoVAE(pl.LightningModule):
         x, y = batch
         forward_out = self.forward(x, y)
         total_loss = forward_out["losses"]["total_loss"]
-        curr_patch_total_loss = forward_out["losses"]["curr_patch_total_loss"]
-        curr_patch_rec_loss = forward_out["losses"]["curr_patch_rec_loss"]
-        curr_patch_kl_div = forward_out["losses"]["curr_patch_kl_div"]
-        next_patch_z_pred_total_loss = forward_out["losses"]["next_patch_z_pred_total_loss"]
-        next_patch_pos_kl_div = forward_out["losses"]["next_patch_pos_kl_div"]
-        image_reconstruction_loss = forward_out["losses"]["image_reconstruction_loss"]
+        self.log_dict({"val_" + k: v for k, v in forward_out["losses"].items()})
 
-        step_sample_zs = forward_out["step_vars"]["sample_zs"]
-        step_z_recons = forward_out["step_vars"]["z_recons"]
-        step_next_z_preds = forward_out["step_vars"]["pred_sample_zs"]
+        # plot kl divergences by layer on the same plots
+        curr_patch_kl_divs_by_layer = forward_out["losses_by_layer"]["curr_patch_kl_divs_by_layer"]
+        _curr_kl_divs = {
+            f"curr_patch_kl_l{i}": v for i, v in enumerate(curr_patch_kl_divs_by_layer)
+        }
+        self.log("val_curr_patch_kl_by_layer", _curr_kl_divs)
+        if self.do_next_patch_prediction:
+            next_patch_kl_divs_by_layer = forward_out["losses_by_layer"]["next_patch_kl_divs_by_layer"]
+            _next_kl_divs = {
+                f"next_patch_kl_l{i}": v for i, v in enumerate(next_patch_kl_divs_by_layer)
+            }
+            self.log("val_next_patch_kl_by_layer", _next_kl_divs)
+
+        step_sample_zs = forward_out["step_vars"]["real_patch_zs"]
+        # step_z_recons = forward_out["step_vars"]["z_recons"]
+        step_next_z_preds = forward_out["step_vars"]["gen_patch_zs"]
+        patches = forward_out["step_vars"]["patches"]
         step_patch_positions = forward_out["step_vars"]["patch_positions"]
 
         # step_sample_zs: (n_steps, n_layers, batch_size, z_dim)
-        # step_z_recons: (n_steps, n_layers, batch_size, z_dim)
-        # last step_z_recons is the one used for reconstruction: step_z_recons[0, 0, -1].size()=n_channels*patch_dim*patch_dim
         assert (
-            step_z_recons[0][-1][0].size()
+            patches[0][0].size()
             == step_sample_zs[0][0][0].size()
             == torch.Size([self.num_channels * self.patch_dim * self.patch_dim])
         )
-        assert (
-            step_sample_zs[0][1][0].size()
-            == step_z_recons[0][0][-2].size()
-            == torch.Size([self.z_dim])
-        )
-        self.log("val_total_loss", total_loss)
-        self.log("val_curr_patch_total_loss", curr_patch_total_loss)
-        self.log("val_next_patch_zpred_total_loss", next_patch_z_pred_total_loss)
-        self.log("val_curr_patch_rec_loss", curr_patch_rec_loss)
-        self.log("val_curr_patch_kl_div", curr_patch_kl_div)
-        self.log("val_next_patch_pos_kl_div", next_patch_pos_kl_div)
-        self.log("val_image_recon_loss", image_reconstruction_loss)
+        assert step_sample_zs[0][1][0].size() == torch.Size([self.z_dim])
 
         if batch_idx == 0:
             N_TO_PLOT = 4
@@ -894,7 +1145,7 @@ class FoVAE(pl.LightningModule):
             # plot foveations on images
             for step, img_step_batch in enumerate(real_images):
                 # positions = (
-                #     step_sample_zs[step][0]
+                #     patches[step]
                 #     .view(-1, self.num_channels, self.patch_dim, self.patch_dim)[:N_TO_PLOT, -2:]
                 #     .mean(dim=(2, 3))
                 # )
@@ -914,52 +1165,53 @@ class FoVAE(pl.LightningModule):
 
             # plot patches
             for step in range(self.n_steps):
-                patches = remove_pos_channels_from_batch(
+                step_patch_batch = remove_pos_channels_from_batch(
+                    patches[step][:N_TO_PLOT].view(
+                        -1, self.num_channels, self.patch_dim, self.patch_dim
+                    )
+                )
+                for i in range(N_TO_PLOT):
+                    imshow_unnorm(step_patch_batch[i].cpu(), ax=axs[i][1][step])
+                    axs[i][1][step].set_title(f"Patch at step {step}", fontsize=8)
+
+            # plot patch reconstructions
+            for step in range(self.n_steps):
+                step_patch_batch = remove_pos_channels_from_batch(
                     step_sample_zs[step][0][:N_TO_PLOT].view(
                         -1, self.num_channels, self.patch_dim, self.patch_dim
                     )
                 )
                 for i in range(N_TO_PLOT):
-                    imshow_unnorm(patches[i].cpu(), ax=axs[i][1][step])
-                    axs[i][1][step].set_title(f"Patch at step {step}", fontsize=8)
-
-            # plot patch reconstructions
-            for step in range(self.n_steps):
-                patches = remove_pos_channels_from_batch(
-                    step_z_recons[step][-1][:N_TO_PLOT].view(
-                        -1, self.num_channels, self.patch_dim, self.patch_dim
-                    )
-                )
-                for i in range(N_TO_PLOT):
-                    imshow_unnorm(patches[i].cpu(), ax=axs[i][2][step])
+                    imshow_unnorm(step_patch_batch[i].cpu(), ax=axs[i][2][step])
                     axs[i][2][step].set_title(f"Patch reconstruction at step {step}", fontsize=8)
 
             # plot next patch predictions
-            for step in range(self.n_steps):
-                pred_patches = step_next_z_preds[step][0][:N_TO_PLOT].view(
-                    -1, self.num_channels, self.patch_dim, self.patch_dim
-                )
-                pred_pos = (pred_patches[:, -2:].mean(dim=(2, 3)) / 2 + 0.5).cpu() * torch.tensor(
-                    [h, w]
-                )
-                pred_patches = remove_pos_channels_from_batch(pred_patches)
-                for i in range(N_TO_PLOT):
-                    ax = axs[i][3][step]
-                    imshow_unnorm(pred_patches[i].cpu(), ax=ax)
-                    ax.set_title(
-                        f"Next patch pred. at step {step} - ({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
-                        fontsize=8,
+            if self.do_next_patch_prediction:
+                for step in range(self.n_steps):
+                    pred_patches = step_next_z_preds[step][0][:N_TO_PLOT].view(
+                        -1, self.num_channels, self.patch_dim, self.patch_dim
                     )
-                    # ax.text(
-                    #     -0.05,
-                    #     -0.05,
-                    #     f"(pred: {pred_pos[i][0]:.2f}, {pred_pos[i][1]:.2f})",
-                    #     color="white",
-                    #     fontsize=8,
-                    #     bbox=dict(facecolor="black", alpha=0.5),
-                    #     horizontalalignment="left",
-                    #     verticalalignment="top",
-                    # )
+                    pred_pos = (pred_patches[:, -2:].mean(dim=(2, 3)) / 2 + 0.5).cpu() * torch.tensor(
+                        [h, w]
+                    )
+                    pred_patches = remove_pos_channels_from_batch(pred_patches)
+                    for i in range(N_TO_PLOT):
+                        ax = axs[i][3][step]
+                        imshow_unnorm(pred_patches[i].cpu(), ax=ax)
+                        ax.set_title(
+                            f"Next patch pred. at step {step} - ({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
+                            fontsize=8,
+                        )
+                        # ax.text(
+                        #     -0.05,
+                        #     -0.05,
+                        #     f"(pred: {pred_pos[i][0]:.2f}, {pred_pos[i][1]:.2f})",
+                        #     color="white",
+                        #     fontsize=8,
+                        #     bbox=dict(facecolor="black", alpha=0.5),
+                        #     horizontalalignment="left",
+                        #     verticalalignment="top",
+                        # )
 
             # add to tensorboard
             for i, fig in enumerate(figs):
@@ -996,10 +1248,7 @@ class FoVAE(pl.LightningModule):
             tensorboard.add_images(
                 "Real Patches",
                 remove_pos_channels_from_batch(
-                    step_sample_zs[0][0][:32].view(
-                        -1, self.num_channels, self.patch_dim, self.patch_dim
-                    )
-                    / 2
+                    patches[0][:32].view(-1, self.num_channels, self.patch_dim, self.patch_dim) / 2
                     + 0.5
                 ),
                 global_step=0,
@@ -1007,7 +1256,7 @@ class FoVAE(pl.LightningModule):
             tensorboard.add_images(
                 "Reconstructed Patches",
                 remove_pos_channels_from_batch(
-                    step_z_recons[0][-1][:32].view(
+                    step_sample_zs[0][0][:32].view(
                         -1, self.num_channels, self.patch_dim, self.patch_dim
                     )
                     / 2
@@ -1024,8 +1273,8 @@ class FoVAE(pl.LightningModule):
                 ]
 
             # img = self._add_pos_encodings_to_img_batch(x[[0]])
-            # get first-level z of first step of first image of batch.
-            z_level = 1
+            # get top-level z of first step of first image of batch.
+            z_level = -1
             first_step_zs = step_sample_zs[0][z_level][0].unsqueeze(0)
             traversal_abs = self.latent_traverse(
                 first_step_zs, z_level=z_level, range_limit=3, step=0.5
