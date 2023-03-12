@@ -1246,7 +1246,10 @@ class FoVAE(pl.LightningModule):
                     [[level[:N_TO_PLOT] for level in step] for step in step_sample_zs],
                     image=None,
                     return_patches=True,
-                )
+                ).cpu()
+
+                ring_radius = self.patch_dim // 2 - self.fovea_radius
+
 
                 for i in range(N_TO_PLOT):
                     # ax = axs[i]
@@ -1259,8 +1262,9 @@ class FoVAE(pl.LightningModule):
                     tensorboard.add_image(
                         f"Image Reconstructions {i}",
                         torchvision.utils.make_grid(
-                            remove_pos_channels_from_batch(reconstructed_images[i]) / 2 + 0.5,
+                            remove_pos_channels_from_batch(reconstructed_images[i])[:, :, ring_radius:-ring_radius, ring_radius:-ring_radius] / 2 + 0.5,
                             nrow=int(np.sqrt(len(reconstructed_images[i]))),
+                            padding=1
                         ),
                         global_step=self.global_step,
                     )
@@ -1271,7 +1275,7 @@ class FoVAE(pl.LightningModule):
                 remove_pos_channels_from_batch(
                     patches[0][:32].view(-1, self.num_channels, self.patch_dim, self.patch_dim) / 2
                     + 0.5
-                ),
+                ).cpu(),
                 global_step=0,
             )
             tensorboard.add_images(
@@ -1282,7 +1286,7 @@ class FoVAE(pl.LightningModule):
                     )
                     / 2
                     + 0.5
-                ),
+                ).cpu(),
                 global_step=self.global_step,
             )
 
