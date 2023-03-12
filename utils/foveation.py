@@ -215,8 +215,9 @@ def get_default_gaussian_foveation_filter_params(
 
 Z_EPS = 1e-2
 
+# import pprofile
 
-def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
+def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict, memo: dict = None):
     """Sample image according to foveation params, sampling each peripheral point based
     on a AvgPool2D mean of its surrounding points
     """
@@ -284,12 +285,23 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
         )  # TODO: there's really one sigma per ring, shouldn't have to average them
         scale_factors.append(scale_factor)
 
-    pyramid = create_pyramid(
-        image,
-        None,
-        levels=1 + len(foveation_params["peripheral_rings"]),
-        scale_factors=scale_factors,
-    )
+    if memo and "pyramid" in memo and memo["image"] is image and memo["scale_factors"] == scale_factors:
+        # print("reusing memoized pyramid", flush=True)
+        pyramid = memo["pyramid"]
+    else:
+        pyramid = create_pyramid(
+            image,
+            None,
+            levels=1 + len(foveation_params["peripheral_rings"]),
+            scale_factors=scale_factors,
+        )
+        memo = {"image": image, "scale_factors": scale_factors, "pyramid": pyramid}
+
+    def _assign_indices(foveated_image, p, target_indices, batch_idx, channel_idx, x_idx, y_idx):
+        foveated_image[:, :, target_indices[:, 1], target_indices[:, 0]] = p[
+            batch_idx, channel_idx, x_idx, y_idx
+        ]
+
     for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
         scale_factor = scale_factors[i]
         target_indices = ring["target_indices"].long()
@@ -308,10 +320,13 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
             y_idx < pyramid[i].shape[3]
         ).all(), f"Invalid y_idx for indexing pyramid of size {pyramid[i].shape[3]}: {y_idx}"
 
+        # _assign_indices(foveated_image, pyramid[i], target_indices, batch_idx, channel_idx, x_idx, y_idx)
         foveated_image[:, :, target_indices[:, 1], target_indices[:, 0]] = pyramid[i][
             batch_idx, channel_idx, x_idx, y_idx
         ]
-    return foveated_image
+
+    # profiler.dump_stats("mean_foveation_profiler_stats.txt")
+    return foveated_image, memo
 
 
 def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):

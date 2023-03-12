@@ -1,6 +1,6 @@
 import gc
 from copy import deepcopy
-from typing import Iterable, List, Literal, Tuple, Union, Optional
+from typing import Iterable, List, Literal, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,6 +10,8 @@ import torch.nn.functional as F
 import torch.nn.init as init
 import torchvision
 from torch import nn, optim
+from timeit import default_timer as timer
+
 
 import utils.foveation as fov_utils
 from modules.transformers import VisionTransformer
@@ -277,9 +279,9 @@ class NextPatchPredictor(nn.Module):
         self.top_z_predictor = VisionTransformer(
             input_dim=z_dims[-1] + 2,  # 2 for concatenated next position
             output_dim=z_dims[-1] * 2,
-            embed_dim=64,  # TODO
-            hidden_dim=128,  # TODO
-            num_heads=1,  # TODO
+            embed_dim=256,  # TODO
+            hidden_dim=512,  # TODO
+            num_heads=4,  # TODO
             num_layers=3,  # TODO
             dropout=0,
         )
@@ -287,9 +289,9 @@ class NextPatchPredictor(nn.Module):
         self.next_location_predictor = VisionTransformer(
             input_dim=z_dims[-1],
             output_dim=2 * 2,
-            embed_dim=64,  # TODO
-            hidden_dim=128,  # TODO
-            num_heads=1,  # TODO
+            embed_dim=256,  # TODO
+            hidden_dim=512,  # TODO
+            num_heads=4,  # TODO
             num_layers=3,  # TODO
             dropout=0,
         )
@@ -478,15 +480,15 @@ class FoVAE(pl.LightningModule):
         input_dim = self.patch_dim * self.patch_dim * self.num_channels
 
         if n_vae_levels == 1:
-            VAE_LADDER_DIMS = [25]
+            VAE_LADDER_DIMS = [32]
             VAE_Z_DIMS = [z_dim]
-            LADDER_HIDDEN_DIMS = [[256, 256]]
+            LADDER_HIDDEN_DIMS = [[512, 512]]
             LVAE_INF_HIDDEN_DIMS = [[256, 256]]
             LVAE_GEN_HIDDEN_DIMS = [[256, 256]]
         elif n_vae_levels == 2:
-            VAE_LADDER_DIMS = [25, 16]
-            VAE_Z_DIMS = [z_dim, z_dim]
-            LADDER_HIDDEN_DIMS = [[256, 256], [128, 128]]
+            VAE_LADDER_DIMS = [32, 32]
+            VAE_Z_DIMS = [z_dim, z_dim//2]
+            LADDER_HIDDEN_DIMS = [[512, 512], [256, 256]]
             LVAE_INF_HIDDEN_DIMS = [[256, 256], [128, 128]]
             LVAE_GEN_HIDDEN_DIMS = [[256, 256], [128, 128]]
 
@@ -567,11 +569,18 @@ class FoVAE(pl.LightningModule):
             [],
         )
 
-        def get_patch_from_pos(pos):
-            # TODO: investigate why reshape vs. view is needed
-            patch = self._foveate_to_loc(x_full, pos).reshape(b, -1)
-            assert patch.shape == (b, self.num_channels * self.patch_dim * self.patch_dim)
-            return patch
+        def memoized_patch_getter(x_full):
+            _fov_memo = None
+            def get_patch_from_pos(pos):
+                # TODO: investigate why reshape vs. view is needed
+                nonlocal _fov_memo
+                patch, _fov_memo = self._foveate_to_loc(x_full, pos, _fov_memo=_fov_memo)
+                patch = patch.reshape(b, -1)
+                assert patch.shape == (b, self.num_channels * self.patch_dim * self.patch_dim)
+                return patch
+            return get_patch_from_pos
+
+        get_patch_from_pos = memoized_patch_getter(x_full)
 
         initial_positions = torch.tensor([0.0, 0.0], device=x.device).unsqueeze(0).repeat(b, 1)
         patches = [get_patch_from_pos(initial_positions)]
@@ -808,12 +817,23 @@ class FoVAE(pl.LightningModule):
         positions = torch.stack(torch.meshgrid(positions_x, positions_y, indexing="xy"), dim=-1)
         positions = positions.view(-1, 2).unsqueeze(1).expand(-1, b, -1)
 
+        def memoized_patch_getter(image):
+            _fov_memo = None
+            def get_patch_from_pos(pos):
+                nonlocal _fov_memo
+                patch, _fov_memo = self._foveate_to_loc(image, pos, _fov_memo=_fov_memo)
+                return patch
+            return get_patch_from_pos
+
         # predict zs for each position
         image_recon_loss = None
         gen_zs = [*sample_zs]
         patches = []
+        if image is not None:
+            _memo_foveate_to_loc = memoized_patch_getter(image)
         # TODO: maybe reconstruct only some patches?
-        for position in positions:
+
+        for i, position in enumerate(positions):
             gen_dict = self._gen_next_patch(gen_zs, forced_next_location=position)
             gen_patch = gen_dict["generation"]["sample_zs"][0]
             # gen_zs.append(gen_dict["generation"]["sample_zs"])
@@ -821,7 +841,7 @@ class FoVAE(pl.LightningModule):
             if image is not None:
                 if image_recon_loss is None:
                     image_recon_loss = 0.0
-                real_patch = self._foveate_to_loc(image, position)  # SLOWWWWW
+                real_patch = _memo_foveate_to_loc(position)
                 assert torch.is_same_size(gen_patch, real_patch)
                 # TODO: mask to fovea only
                 patch_recon_loss = -1 * gaussian_likelihood(real_patch, gen_patch)
@@ -836,11 +856,14 @@ class FoVAE(pl.LightningModule):
         else:
             return image_recon_loss, None
 
-    def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor):
+    def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor, _fov_memo: dict=None):
         # image: (b, c, h, w)
         # loc: (b, 2), where entries are in [-1, 1]
         # filters: (out_h, out_w, rf_h, rf_w)
         # out: (b, c, out_h, out_w, rf_h, rf_w)
+
+        # start = timer()
+        # is_memo = _fov_memo is not None
 
         b, c, h, w = image.shape
 
@@ -853,30 +876,34 @@ class FoVAE(pl.LightningModule):
         else:
             raise ValueError(f"Unknown padding mode: {self.foveation_padding_mode}")
 
-        pad_offset = [0, 0]
-        if self.foveation_padding == "max":
-            pad_offset = np.ceil([h / 2, w / 2]).astype(int).tolist()
-            padded_image = F.pad(
-                image,
-                (pad_offset[0], pad_offset[0], pad_offset[1], pad_offset[1]),
-                mode=padding_mode,
-                value=pad_value,
-            )
-        elif self.foveation_padding > 0:
-            pad_offset = [self.foveation_padding, self.foveation_padding]
-            padded_image = F.pad(
-                image,
-                (
-                    self.foveation_padding,
-                    self.foveation_padding,
-                    self.foveation_padding,
-                    self.foveation_padding,
-                ),
-                mode=padding_mode,
-                value=pad_value,
-            )
+        if _fov_memo is not None and _fov_memo["orig_image"] is image:
+            padded_image = _fov_memo["padded_image"]
+            pad_offset = _fov_memo["pad_offset"]
         else:
-            padded_image = image
+            pad_offset = [0, 0]
+            if self.foveation_padding == "max":
+                pad_offset = np.ceil([h / 2, w / 2]).astype(int).tolist()
+                padded_image = F.pad(
+                    image,
+                    (pad_offset[0], pad_offset[0], pad_offset[1], pad_offset[1]),
+                    mode=padding_mode,
+                    value=pad_value,
+                )
+            elif self.foveation_padding > 0:
+                pad_offset = [self.foveation_padding, self.foveation_padding]
+                padded_image = F.pad(
+                    image,
+                    (
+                        self.foveation_padding,
+                        self.foveation_padding,
+                        self.foveation_padding,
+                        self.foveation_padding,
+                    ),
+                    mode=padding_mode,
+                    value=pad_value,
+                )
+            else:
+                padded_image = image
 
         # pad_h, pad_w = padded_image.shape[-2:]
 
@@ -884,12 +911,21 @@ class FoVAE(pl.LightningModule):
         gaussian_filter_params = self._move_default_filter_params_to_loc(loc, (h, w), pad_offset)
 
         # foveate
-        foveated_image = fov_utils.apply_mean_foveation_pyramid(
-            padded_image, gaussian_filter_params
+        foveated_image, _fov_memo = fov_utils.apply_mean_foveation_pyramid(
+            padded_image, gaussian_filter_params, memo=_fov_memo
         )
+
+        _fov_memo["orig_image"] = image
+        _fov_memo["padded_image"] = padded_image
+        _fov_memo["pad_offset"] = pad_offset
+
         if foveated_image.isnan().any():
             raise ValueError("NaNs in foveated image!")
-        return foveated_image
+
+        # end = timer()
+        # print(f"Foveation time (memoized: {is_memo}, training: {self.training}): {end - start}", flush=True)
+
+        return foveated_image, _fov_memo
 
     def _move_default_filter_params_to_loc(
         self, loc: torch.Tensor, image_dim: Iterable, pad_offset: Optional[Iterable] = None
