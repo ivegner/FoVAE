@@ -499,7 +499,7 @@ class FoVAE(pl.LightningModule):
         fovea_radius=2,
         patch_dim=6,
         patch_channels=3,
-        # n_vae_levels=1,
+        n_vae_levels=1,
         z_dim=10,
         n_steps: int = 1,
         foveation_padding: Union[Literal["max"], int] = "max",
@@ -522,7 +522,7 @@ class FoVAE(pl.LightningModule):
         self.patch_dim = patch_dim
         self.z_dim = z_dim
 
-        # self.n_vae_levels = n_vae_levels
+        self.n_vae_levels = n_vae_levels
 
         self.n_steps = n_steps
         # if do_add_pos_encoding:
@@ -533,12 +533,23 @@ class FoVAE(pl.LightningModule):
 
         input_dim = self.patch_dim * self.patch_dim * self.num_channels
 
-        VAE_LADDER_DIMS = [25]
-        VAE_Z_DIMS = [z_dim]
 
-        self.ladder = Ladder(input_dim, VAE_LADDER_DIMS, [[256, 256]])
+        if n_vae_levels == 1:
+            VAE_LADDER_DIMS = [25]
+            VAE_Z_DIMS = [z_dim]
+            LADDER_HIDDEN_DIMS = [[256, 256]]
+            LVAE_INF_HIDDEN_DIMS = [[256, 256]]
+            LVAE_GEN_HIDDEN_DIMS = [[256, 256]]
+        elif n_vae_levels == 2:
+            VAE_LADDER_DIMS = [25, 16]
+            VAE_Z_DIMS = [z_dim, z_dim]
+            LADDER_HIDDEN_DIMS = [[256, 256], [128, 128]]
+            LVAE_INF_HIDDEN_DIMS = [[256, 256], [128, 128]]
+            LVAE_GEN_HIDDEN_DIMS = [[256, 256], [128, 128]]
+
+        self.ladder = Ladder(input_dim, VAE_LADDER_DIMS, LADDER_HIDDEN_DIMS)
         self.ladder_vae = LadderVAE(
-            input_dim, VAE_LADDER_DIMS, VAE_Z_DIMS, [[256, 256]], [[256, 256]]
+            input_dim, VAE_LADDER_DIMS, VAE_Z_DIMS, LVAE_INF_HIDDEN_DIMS, LVAE_GEN_HIDDEN_DIMS
         )
         self.next_patch_predictor = NextPatchPredictor(
             ladder_vae=self.ladder_vae,
@@ -676,8 +687,11 @@ class FoVAE(pl.LightningModule):
                 curr_patch, curr_patch_dict["sample_zs"][0]
             )
             _curr_patch_kl_divs = []
-            for mu, logvar in curr_patch_dict["mu_logvars_gen"][(0 if DO_KL_ON_INPUT_LEVEL else 1):]:
-                _curr_patch_kl_divs.append(gaussian_kl_divergence(mu=mu, logvar=logvar))
+            for i, (mu, logvar) in enumerate(curr_patch_dict["mu_logvars_gen"]):
+                kl = gaussian_kl_divergence(mu=mu, logvar=logvar)
+                if i == 0 and not DO_KL_ON_INPUT_LEVEL:
+                    kl = torch.zeros_like(kl)
+                _curr_patch_kl_divs.append(kl)
 
             # calculate kl divergence between predicted next patch pos and std-normal prior
             # only do kl divergence because reconstruction of next_pos is captured in next_patch_rec_loss
@@ -704,13 +718,12 @@ class FoVAE(pl.LightningModule):
                         level_rec_loss = -1 * gaussian_likelihood(
                             curr_patch_dict["sample_zs"][i], prev_step_gen_sample_zs[i]
                         )
+                    level_kl = gaussian_kl_divergence(
+                        mu=next_patch_dict["generation"]["mu_logvars_gen"][i][0],
+                        logvar=next_patch_dict["generation"]["mu_logvars_gen"][i][1],
+                    )
                     if i == 0 and not DO_KL_ON_INPUT_LEVEL:
-                        level_kl = 0.
-                    else:
-                        level_kl = gaussian_kl_divergence(
-                            mu=next_patch_dict["generation"]["mu_logvars_gen"][i][0],
-                            logvar=next_patch_dict["generation"]["mu_logvars_gen"][i][1],
-                        )
+                        level_kl = torch.zeros_like(level_kl)
 
                     _next_patch_rec_losses.append(level_rec_loss)
                     _next_patch_kl_divs.append(level_kl)
