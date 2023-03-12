@@ -333,20 +333,20 @@ class NextPatchPredictor(nn.Module):
         self.top_z_predictor = VisionTransformer(
             input_dim=z_dims[-1] + 2,  # 2 for concatenated next position
             output_dim=z_dims[-1] * 2,
-            embed_dim=32,  # TODO
-            hidden_dim=64,  # TODO
+            embed_dim=64,  # TODO
+            hidden_dim=128,  # TODO
             num_heads=1,  # TODO
-            num_layers=1,  # TODO
+            num_layers=3,  # TODO
             dropout=0,
         )
 
         self.next_location_predictor = VisionTransformer(
             input_dim=z_dims[-1],
             output_dim=2 * 2,
-            embed_dim=32,  # TODO
-            hidden_dim=64,  # TODO
+            embed_dim=64,  # TODO
+            hidden_dim=128,  # TODO
             num_heads=1,  # TODO
-            num_layers=1,  # TODO
+            num_layers=3,  # TODO
             dropout=0,
         )
 
@@ -563,10 +563,10 @@ class FoVAE(pl.LightningModule):
         self.betas = dict(
             curr_patch_recon=1,
             curr_patch_kl=beta_vae,
-            next_patch_pos_kl=0,
+            next_patch_pos_kl=1,
             next_patch_recon=1,
             next_patch_kl=beta_vae,
-            image_recon=1,
+            image_recon=20,
         )
 
         # image: (b, c, image_dim[0], image_dim[1])
@@ -598,6 +598,7 @@ class FoVAE(pl.LightningModule):
 
         x_full = self._add_pos_encodings_to_img_batch(x)
 
+        DO_KL_ON_INPUT_LEVEL = False
 
         curr_patch_rec_total_loss = 0.0
         curr_patch_kl_div_total_loss = 0.0
@@ -675,7 +676,7 @@ class FoVAE(pl.LightningModule):
                 curr_patch, curr_patch_dict["sample_zs"][0]
             )
             _curr_patch_kl_divs = []
-            for mu, logvar in curr_patch_dict["mu_logvars_gen"]:
+            for mu, logvar in curr_patch_dict["mu_logvars_gen"][(0 if DO_KL_ON_INPUT_LEVEL else 1):]:
                 _curr_patch_kl_divs.append(gaussian_kl_divergence(mu=mu, logvar=logvar))
 
             # calculate kl divergence between predicted next patch pos and std-normal prior
@@ -694,18 +695,26 @@ class FoVAE(pl.LightningModule):
                 prev_step_gen_sample_zs = gen_patch_zs[-2]
                 _next_patch_rec_losses, _next_patch_kl_divs = [], []
                 for i in range(len(prev_step_gen_sample_zs)):
-                    _next_patch_rec_losses.append(
-                        -1
-                        * gaussian_likelihood(
+                    if i == 0:
+                        # input-level, compare against real patch
+                        level_rec_loss = -1 * gaussian_likelihood(
+                                curr_patch, prev_step_gen_sample_zs[i]
+                            )
+                    else:
+                        level_rec_loss = -1 * gaussian_likelihood(
                             curr_patch_dict["sample_zs"][i], prev_step_gen_sample_zs[i]
                         )
-                    )
-                    _next_patch_kl_divs.append(
-                        gaussian_kl_divergence(
+                    if i == 0 and not DO_KL_ON_INPUT_LEVEL:
+                        level_kl = 0.
+                    else:
+                        level_kl = gaussian_kl_divergence(
                             mu=next_patch_dict["generation"]["mu_logvars_gen"][i][0],
                             logvar=next_patch_dict["generation"]["mu_logvars_gen"][i][1],
                         )
-                    )
+
+                    _next_patch_rec_losses.append(level_rec_loss)
+                    _next_patch_kl_divs.append(level_kl)
+
                 next_patch_rec_losses_by_layer.append(torch.stack(_next_patch_rec_losses, dim=0))
                 next_patch_kl_divs_by_layer.append(torch.stack(_next_patch_kl_divs, dim=0))
 
