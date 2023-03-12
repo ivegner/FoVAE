@@ -1,6 +1,6 @@
 import gc
 from copy import deepcopy
-from typing import *
+from typing import Iterable, List, Literal, Tuple, Union, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -219,7 +219,8 @@ class LadderVAE(nn.Module):
                 else:
                     # combine inference and generative parameters by inverse variance weighting
                     # TODO: there has to be a way to do this without exponentiation
-                    # also TODO: explore parametric combination methods (e.g. concat + linear transform)
+                    # also TODO: explore parametric combination methods
+                    # (e.g. concat + linear transform)
 
                     _var_inf = torch.exp(logvar_inf)
                     _var_gen = torch.exp(logvar_gen_prior)
@@ -264,63 +265,6 @@ class LadderVAE(nn.Module):
             sample_zs=sample_zs,  # len(n_vae_layers+1)
         )
 
-        # for i, layer in reversed(list(enumerate(self.generative_layers))):
-        #     # iterate from the top layer down
-        #     is_top_layer = i == len(self.generative_layers) - 1
-        #     if is_top_layer:
-        #         if top_z is not None:
-        #             # if top z is provided, use that directly
-        #             mu_logvars_gen_prior.insert(0, (None, None))
-        #             mu_logvars_gen.insert(0, (None, None))
-        #             sample_zs.insert(0, top_z)
-        #             continue
-        #         elif top_gen_prior_mu_logvar is not None:
-        #             # if top generative prior mu+logvar is provided (e.g. for generation), use that
-        #             mu_gen_prior, logvar_gen_prior = top_gen_prior_mu_logvar
-        #         else:
-        #             mu_gen_prior, logvar_gen_prior = None, None
-        #     else:
-        #         gen_z_from_above = sample_zs[0]
-        #         distribution = layer(gen_z_from_above)
-        #         z_dim = int(distribution.size(1) / 2)
-        #         assert z_dim == (
-        #             distribution.size(1) / 2
-        #         ), "Generative latent dimension should be even"
-        #         mu_gen_prior, logvar_gen_prior = distribution[:, :z_dim], distribution[:, z_dim:]
-
-        #     if inference_mu_logvars is None:
-        #         # straight generation
-        #         mu, logvar = mu_gen_prior, logvar_gen_prior
-        #     elif is_top_layer and top_gen_prior_mu_logvar is None:
-        #         # if top z nor top prior is not provided, use inference mu+logvar as generative prior
-        #         mu, logvar = inference_mu_logvars[i]
-        #     else:
-        #         # combine inference and generative parameters by inverse variance weighting
-        #         # TODO: there has to be a way to do this without exponentiation
-        #         # also TODO: explore parametric combination methods (e.g. concat + linear transform)
-        #         mu_inf, logvar_inf = inference_mu_logvars[i]
-        #         _var_inf = torch.exp(logvar_inf)
-        #         _var_gen = torch.exp(logvar_gen_prior)
-
-        #         var = 1 / (1 / _var_inf + 1 / _var_gen)
-        #         mu = var * (mu_inf / _var_inf + mu_gen_prior / _var_gen)
-        #         logvar = torch.log(var)
-
-        #     # if is_top_layer:
-        #     #     assert torch.isclose(
-        #     #         mu, mu_inf
-        #     #     ).all(), "Top layer mu should be same as inference mu"
-        #     #     assert torch.isclose(
-        #     #         logvar, logvar_inf
-        #     #     ).all(), "Top layer logvar should be same as inference logvar"
-
-        #     # sample from combined distribution
-        #     z = reparam_sample(mu, logvar)
-
-        #     mu_logvars_gen_prior.insert(0, (mu_gen_prior, logvar_gen_prior))
-        #     mu_logvars_gen.insert(0, (mu, logvar))
-        #     sample_zs.insert(0, z)
-
 
 class NextPatchPredictor(nn.Module):
     def __init__(self, ladder_vae: LadderVAE, z_dims: List[int], do_random_foveation: bool = False):
@@ -356,11 +300,11 @@ class NextPatchPredictor(nn.Module):
         forced_next_location: torch.Tensor = None,
         randomize_next_location: bool = False,
     ):
-        # patch_step_zs: list(n_steps_so_far) of lists (n_levels from lowest to highest) of tensors (b, dim)
+        # patch_step_zs: n_steps_so_far x (n_levels from low to high) x (b, dim)
         # highest-level z is the last element of the list
 
         n_steps = len(patch_step_zs)
-        n_levels = len(patch_step_zs[0])
+        # n_levels = len(patch_step_zs[0])
         top_zs = [patch_step_zs[i][-1] for i in range(n_steps)]
         b = top_zs[0].size(0)
         device = top_zs[0].device
@@ -405,7 +349,7 @@ class NextPatchPredictor(nn.Module):
         self, patch_step_zs: List[List[torch.Tensor]], next_loc: torch.Tensor
     ):
         n_steps = len(patch_step_zs)
-        n_levels = len(patch_step_zs[0])
+        # n_levels = len(patch_step_zs[0])
         b = patch_step_zs[0][0].size(0)
         assert next_loc.size() == torch.Size([b, 2]), "next_loc should be (b, 2)"
 
@@ -533,7 +477,6 @@ class FoVAE(pl.LightningModule):
 
         input_dim = self.patch_dim * self.patch_dim * self.num_channels
 
-
         if n_vae_levels == 1:
             VAE_LADDER_DIMS = [25]
             VAE_Z_DIMS = [z_dim]
@@ -566,7 +509,8 @@ class FoVAE(pl.LightningModule):
         if do_use_beta_norm:
             beta_vae = (beta * z_dim) / input_dim  # according to beta-vae paper
             print(
-                f"Using normalized betas[1] value of {beta_vae:.6f} as beta, calculated from unnormalized beta_vae {beta:.6f}"
+                f"Using normalized betas[1] value of {beta_vae:.6f} as beta, "
+                f"calculated from unnormalized beta_vae {beta:.6f}"
             )
         else:
             beta_vae = beta
@@ -647,7 +591,8 @@ class FoVAE(pl.LightningModule):
             #   mu_logvars_gen_prior: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
             #   mu_logvars_gen: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
             #   sample_zs: list(n_vae_layers+1) of (b, z_dim)
-            # each list is in order from bottom to top. gen lists and sample_zs have input-level at index 0
+            # each list is in order from bottom to top.
+            # gen lists and sample_zs have input-level at index 0
             assert torch.is_same_size(curr_patch, curr_patch_dict["sample_zs"][0])
             real_patch_zs.append(curr_patch_dict["sample_zs"])
             real_patch_dicts.append(curr_patch_dict)
@@ -658,13 +603,14 @@ class FoVAE(pl.LightningModule):
                 )
                 # next_patch_dict:
                 #   generation:
-                #       mu_logvars_gen_prior: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
-                #       mu_logvars_gen: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
-                #       sample_zs: list(n_vae_layers+1) of (b, z_dim)
+                #     mu_logvars_gen_prior: list(n_vae_layers+1) of (mu, logvar) tuples,
+                #                                                   each (b, z_dim)
+                #     mu_logvars_gen: list(n_vae_layers+1) of (mu, logvar) tuples, each (b, z_dim)
+                #     sample_zs: list(n_vae_layers+1) of (b, z_dim)
                 #   position:
-                #       next_pos: (b, 2)
-                #       next_pos_mu: (b, 2)
-                #       next_pos_logvar: (b, 2)
+                #     next_pos: (b, 2)
+                #     next_pos_mu: (b, 2)
+                #     next_pos_logvar: (b, 2)
                 gen_patch_zs.append(next_patch_dict["generation"]["sample_zs"])
                 gen_patch_dicts.append(next_patch_dict)
 
@@ -694,7 +640,8 @@ class FoVAE(pl.LightningModule):
                 _curr_patch_kl_divs.append(kl)
 
             # calculate kl divergence between predicted next patch pos and std-normal prior
-            # only do kl divergence because reconstruction of next_pos is captured in next_patch_rec_loss
+            # only do kl divergence because
+            # reconstruction of next_pos is captured in next_patch_rec_loss
             _next_patch_pos_kl_div = 0.0
             if not self.do_random_foveation:
                 _next_patch_pos_kl_div = gaussian_kl_divergence(
@@ -702,7 +649,8 @@ class FoVAE(pl.LightningModule):
                     logvar=next_patch_dict["position"]["next_pos_logvar"],
                 )
 
-            # if any previous predicted patch, calculate loss between current patch and previous predicted patch
+            # if any previous predicted patch, calculate loss between
+            # current patch and previous predicted patch
             _next_patch_rec_losses, _next_patch_kl_divs = [], []
             if self.do_next_patch_prediction and len(gen_patch_zs) > 1:
                 # -2 because -1 is the current step, and -2 is the previous step
@@ -712,8 +660,8 @@ class FoVAE(pl.LightningModule):
                     if i == 0:
                         # input-level, compare against real patch
                         level_rec_loss = -1 * gaussian_likelihood(
-                                curr_patch, prev_step_gen_sample_zs[i]
-                            )
+                            curr_patch, prev_step_gen_sample_zs[i]
+                        )
                     else:
                         level_rec_loss = -1 * gaussian_likelihood(
                             curr_patch_dict["sample_zs"][i], prev_step_gen_sample_zs[i]
@@ -742,11 +690,12 @@ class FoVAE(pl.LightningModule):
             # I don't care as long as it's under half a pixel
 
             # this is commented because we do not allow foveation outside the image, and
-            # depending on method of padding, locations in the padding area will not have true locations, but
-            # will be clamped to locations at the edge of the image (or zeros). As such, averaging the locations on the patch
-            # has to be inside the image, but the location would encompass locations outside the image.
-            # this is a useful check though, and should be re-enabled if the foveation method is changed to not rely on
-            # padding and/or clamping
+            # depending on method of padding, locations in the padding area will not
+            # have true locations, but will be clamped to locations at the edge of
+            # the image (or zeros). As such, averaging the locations on the patch
+            # has to be inside the image, but the location would encompass locations
+            # outside the image. this is a useful check though, and should be re-enabled
+            # if the foveation method is changed to not rely on padding and/or clamping
             # _next_patch_center = next_patch.view(
             #     b, self.num_channels, self.patch_dim, self.patch_dim
             # )[:, -2:, :, :].mean(dim=(2, 3))
@@ -754,8 +703,10 @@ class FoVAE(pl.LightningModule):
             # assert (
             #     _next_patch_center - next_patch_sample_pos
             # ).abs().max() <= _acceptable_dist_threshold, (
-            #     f"Next patch position {_next_patch_center.round(2).cpu()} is too far from predicted position {next_patch_sample_pos.round(2).cpu()}: "
-            #     f"{(_next_patch_center - next_patch_sample_pos).abs().max()} > {_acceptable_dist_threshold}"
+            #     f"Next patch position {_next_patch_center.round(2).cpu()} is too "
+            #     f"far from predicted position {next_patch_sample_pos.round(2).cpu()}: "
+            #     f"{(_next_patch_center - next_patch_sample_pos).abs().max()} > "
+            #     f"{_acceptable_dist_threshold}"
             # )
 
         if self.do_image_reconstruction:
@@ -835,7 +786,8 @@ class FoVAE(pl.LightningModule):
                 real_patch_dicts=real_patch_dicts,  # n_steps x n_levels x dict
                 gen_patch_zs=gen_patch_zs,  # n_steps x n_levels x (b, z_dim)
                 gen_patch_dicts=gen_patch_dicts  # n_steps x n_levels x dict
-                # image_reconstruction_patches=image_reconstruction_patches,  # (b, n_patches, n_channels, patch_dim, patch_dim)
+                # (b, n_patches, n_channels, patch_dim, patch_dim)
+                # image_reconstruction_patches=image_reconstruction_patches,
             ),
         )
 
@@ -967,7 +919,9 @@ class FoVAE(pl.LightningModule):
             new_mus = ring["mus"] + (loc - generic_center).unsqueeze(1)
             if not torch.isclose(new_mus.mean(1), loc, atol=1e-4).all():
                 print(
-                    f"New gaussian centers after move not close to loc: {new_mus.mean(1)[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]} vs {loc[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]}"
+                    f"New gaussian centers after move not close to loc: "
+                    f"{new_mus.mean(1)[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]} "
+                    f"vs {loc[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]}"
                 )
             ring["mus"] = new_mus + pad_offset
 
@@ -984,7 +938,8 @@ class FoVAE(pl.LightningModule):
         forced_next_location: Optional[torch.Tensor] = None,
         randomize_next_location: bool = False,
     ):
-        # prev_zs: list(n_steps_so_far) of lists (n_levels from lowest to highest) of tensors (b, dim)
+        # prev_zs: list(n_steps_so_far) of lists
+        #              (n_levels from lowest to highest) of tensors (b, dim)
         # next_patch_pos: Tensor (b, 2)
         # highest-level z is the last element of the list
 
@@ -1083,7 +1038,7 @@ class FoVAE(pl.LightningModule):
         # TODO: skip on grad norm
         skip_update = float(torch.isnan(total_loss))
         if skip_update:
-            print(f"Skipping update!", forward_out["losses"])
+            print("Skipping update!", forward_out["losses"])
 
         self.log(
             "n_skipped_steps",
@@ -1111,7 +1066,9 @@ class FoVAE(pl.LightningModule):
         }
         self.log("val_curr_patch_kl_by_layer", _curr_kl_divs)
         if self.do_next_patch_prediction:
-            next_patch_kl_divs_by_layer = forward_out["losses_by_layer"]["next_patch_kl_divs_by_layer"]
+            next_patch_kl_divs_by_layer = forward_out["losses_by_layer"][
+                "next_patch_kl_divs_by_layer"
+            ]
             _next_kl_divs = {
                 f"next_patch_kl_l{i}": v for i, v in enumerate(next_patch_kl_divs_by_layer)
             }
@@ -1149,7 +1106,10 @@ class FoVAE(pl.LightningModule):
             # # # # DEBUG: demo foveation to a specific location
             # fig, (ax1, ax2) = plt.subplots(2)
             # loc = torch.tensor([0.0, 0.0]).repeat(1, 1).to("mps")
-            # gaussian_filter_params = _recursive_to(self._move_default_filter_params_to_loc(loc, (h, w), pad_offset=None), "cpu",)
+            # gaussian_filter_params = _recursive_to(
+            #     self._move_default_filter_params_to_loc(loc, (h, w), pad_offset=None),
+            #     "cpu",
+            # )
             # plot_gaussian_foveation_parameters(
             #                     x[[3]].cpu(),
             #                     gaussian_filter_params,
@@ -1159,7 +1119,8 @@ class FoVAE(pl.LightningModule):
             # fov = self._foveate_to_loc(self._add_pos_encodings_to_img_batch(x[[3]]), loc).cpu()
             # imshow_unnorm(fov[0,[0]], ax=ax2)
 
-            # make figure with a column for each step and 3 rows: 1 for image with foveation, one for patch, one for patch reconstruction
+            # make figure with a column for each step and 3 rows:
+            # 1 for image with foveation, one for patch, one for patch reconstruction
 
             figs = [plt.figure(figsize=(self.n_steps * 3, 12)) for _ in range(N_TO_PLOT)]
             axs = [f.subplots(4, self.n_steps) for f in figs]
@@ -1213,15 +1174,16 @@ class FoVAE(pl.LightningModule):
                     pred_patches = step_next_z_preds[step][0][:N_TO_PLOT].view(
                         -1, self.num_channels, self.patch_dim, self.patch_dim
                     )
-                    pred_pos = (pred_patches[:, -2:].mean(dim=(2, 3)) / 2 + 0.5).cpu() * torch.tensor(
-                        [h, w]
-                    )
+                    pred_pos = (
+                        pred_patches[:, -2:].mean(dim=(2, 3)) / 2 + 0.5
+                    ).cpu() * torch.tensor([h, w])
                     pred_patches = remove_pos_channels_from_batch(pred_patches)
                     for i in range(N_TO_PLOT):
                         ax = axs[i][3][step]
                         imshow_unnorm(pred_patches[i].cpu(), ax=ax)
                         ax.set_title(
-                            f"Next patch pred. at step {step} - ({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
+                            f"Next patch pred. at step {step} - "
+                            f"({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
                             fontsize=8,
                         )
                         # ax.text(
@@ -1254,7 +1216,8 @@ class FoVAE(pl.LightningModule):
                     # ax = axs[i]
                     # imshow_unnorm(patches[i].cpu(), ax=ax)
                     # ax.set_title(
-                    #     f"Next patch pred. at step {step} - ({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
+                    #     f"Next patch pred. at step {step} - "
+                    #     f"({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
                     #     fontsize=8,
                     # )
                     tensorboard.add_image(
@@ -1288,7 +1251,8 @@ class FoVAE(pl.LightningModule):
             )
 
             def stack_traversal_output(g):
-                # stack by interp image, then squeeze out the singular batch dimension and index out the 2 position channels
+                # stack by interp image, then squeeze out the singular batch dimension and
+                # index out the 2 position channels
                 return [
                     remove_pos_channels_from_batch(torch.stack(dt).squeeze(1))
                     for dt in traversal_abs
@@ -1329,21 +1293,23 @@ class FoVAE(pl.LightningModule):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
         return optimizer
 
-    # def _get_grad_norm(self):
-    #     total_norm = 0
-    #     parameters = [p for p in self.parameters() if p.grad is not None and p.requires_grad]
-    #     for p in parameters:
-    #         param_norm = p.grad.detach().data.norm(2)
-    #         total_norm += param_norm.item() ** 2
-    #     total_norm = total_norm ** 0.5
-    #     return total_norm
+        # def _get_grad_norm(self):
+        #     total_norm = 0
+        #     parameters = [p for p in self.parameters() if p.grad is not None and p.requires_grad]
+        #     for p in parameters:
+        #         param_norm = p.grad.detach().data.norm(2)
+        #         total_norm += param_norm.item() ** 2
+        #     total_norm = total_norm ** 0.5
+        #     return total_norm
 
-    # def _optimizer_step(self, loss):
-    #     opt = self.optimizers()
-    #     opt.zero_grad()
-    #     self.manual_backward(loss)
+        # def _optimizer_step(self, loss):
+        #     opt = self.optimizers()
+        #     opt.zero_grad()
+        #     self.manual_backward(loss)
 
-    #     grad_norm = self.clip_gradients(opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm")
+        # grad_norm = self.clip_gradients(
+        #     opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm"
+        # )
 
     #     # only update if loss is not NaN and if the grad norm is below a specific threshold
     #     skipped_update = 1
@@ -1385,10 +1351,11 @@ class FoVAE(pl.LightningModule):
 
     #     # skip updates with nans
     #     if True:
-    #         # the closure (which includes the `training_step`) will be executed by `optimizer.step`
+    #         # the closure (which includes the `training_step`) will be executed by optimizer.step
     #         optimizer.step(closure=optimizer_closure)
     #     else:
-    #         # call the closure by itself to run `training_step` + `backward` without an optimizer step
+    #         # call the closure by itself to run `training_step` + `backward` without
+    #         # an optimizer step
     #         optimizer_closure()
 
 

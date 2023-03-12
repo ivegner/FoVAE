@@ -1,4 +1,4 @@
-from typing import *
+from typing import Optional
 import torch
 
 
@@ -34,7 +34,7 @@ def gaussian_kl_divergence(
     logvar: Optional[torch.Tensor] = None,
     mu_prior=0.0,
     std_prior=1.0,
-    reduce="mean"
+    reduce="mean",
 ):
     if std is None and logvar is None:
         raise ValueError("Either std or logvar must be provided")
@@ -49,7 +49,9 @@ def gaussian_kl_divergence(
         # Monte carlo KL divergence
         # --------------------------
         # 1. define the first two probabilities (in this case Normal for both)
-        p = torch.distributions.Normal(torch.ones_like(mu) * mu_prior, torch.ones_like(std) * std_prior)
+        p = torch.distributions.Normal(
+            torch.ones_like(mu) * mu_prior, torch.ones_like(std) * std_prior
+        )
         q = torch.distributions.Normal(mu, std)
 
         # # 2. get the probabilities from the equation

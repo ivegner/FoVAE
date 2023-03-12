@@ -1,6 +1,6 @@
-from matplotlib import pyplot as plt
+# from matplotlib import pyplot as plt
+from typing import List
 import numpy as np
-from typing import *
 
 import torch
 
@@ -33,7 +33,9 @@ def _get_indices_in_ring(x_extent, y_extent, x_center, y_center, radius):
 def get_generic_sampled_ring_indices(
     x_extent, y_extent, x_center, y_center, fovea_radius, max_ring_radius, num_peri_rings_to_attempt
 ):
-    """Get indices of pixels in a square foveated image of given radius centered at (x_center, y_center)"""
+    """Get indices of pixels in a square foveated image of given radius centered at
+    (x_center, y_center)
+    """
 
     # get peri indices
     a = np.exp((np.log(max_ring_radius / fovea_radius)) / num_peri_rings_to_attempt)
@@ -50,7 +52,8 @@ def get_generic_sampled_ring_indices(
 
     if num_peri_rings != num_peri_rings_to_attempt:
         print(
-            f"WARNING: {num_peri_rings_to_attempt} peri rings requested, but only {num_peri_rings} eligible. "
+            f"WARNING: {num_peri_rings_to_attempt} peri rings requested, "
+            f"but only {num_peri_rings} eligible. "
             f"Resulting size will be {foveated_im_dim}x{foveated_im_dim}"
         )
 
@@ -128,7 +131,8 @@ def get_default_gaussian_foveation_filter_params(
     ring_sigma_scaling_factor=1,
     device=None,
 ):  # ring_sigmas: List[float]):
-    """Get default gaussian foveation filter params (mus and sigmas) for a given image size and fovea radius
+    """Get default gaussian foveation filter params (mus and sigmas) for a given image size
+    and fovea radius
 
     Args:
         image_dim: [height, width] of image
@@ -141,8 +145,12 @@ def get_default_gaussian_foveation_filter_params(
     """
     h, w = image_dim
 
-    # assert all(0 <= xy_center[:, 0] < w), f"xy_center[0] must be in [0, {w}) (got: {xy_center[:, 0]})"
-    # assert all(0 <= xy_center[:, 1] < h), f"xy_center[1] must be in [0, {h}) (got: {xy_center[:, 1]})"
+    # assert all(
+    #     0 <= xy_center[:, 0] < w
+    # ), f"xy_center[0] must be in [0, {w}) (got: {xy_center[:, 0]})"
+    # assert all(
+    #     0 <= xy_center[:, 1] < h
+    # ), f"xy_center[1] must be in [0, {h}) (got: {xy_center[:, 1]})"
     # assert h % 2 == w % 2 == 0, f"Image must be even-sized (got: {image.shape})"
     assert fovea_radius % 2 == 0, f"Fovea radius must be even (got: {fovea_radius})"
     assert image_out_dim % 2 == 0, f"Image out dim must be even (got: {image_out_dim})"
@@ -216,7 +224,7 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
     b, c, h, w = image.size()
     fov_h, fov_w = foveation_params["foveated_image_dim"]
 
-    # def gaussian_kernel(size=5, device=torch.device('cpu'), channels=3, sigma=1, dtype=torch.float):
+    # def gaussian_kernel(size=5, device='cpu', channels=3, sigma=1, dtype=torch.float):
     #     # Create Gaussian Kernel. In Numpy
     #     interval  = (2*sigma +1)/(size)
     #     ax = np.linspace(-(size - 1)/ 2., (size-1)/2., size)
@@ -235,7 +243,8 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
     #     channels = g_kernel.shape[0]
     #     padding = g_kernel.shape[-1] // 2 # Kernel size needs to be odd number
     #     if len(x.shape) != 4:
-    #         raise IndexError('Expected input tensor to be of shape: (batch, depth, height, width) but got: ' + str(x.shape))
+    #         raise IndexError('Expected input tensor to be of shape: (batch, depth, height, width)'
+    #                          'but got: ' + str(x.shape))
     #     y = F.conv2d(x, weight=g_kernel, stride=1, padding=padding, groups=channels)
     #     return y
 
@@ -244,11 +253,10 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
     #     return x[:, :, ::2, ::2]
 
     def create_pyramid(x, kernel, levels, scale_factors):
-        # upsample = torch.nn.Upsample(scale_factor=scale_factor) # Default mode is nearest: [[1 2],[3 4]] -> [[1 1 2 2],[3 3 4 4]]
+        # Default upsampling mode is nearest: [[1 2],[3 4]] -> [[1 1 2 2],[3 3 4 4]]
+        # upsample = torch.nn.Upsample(scale_factor=scale_factor)
         # Downsamples along image (H,W). Takes every 2 pixels. output (H, W) = input (H/2, W/2)
-        downsample = (
-            torch.nn.functional.avg_pool2d
-        )  # torch.nn.functional.adaptive_avg_pool2d
+        downsample = torch.nn.functional.avg_pool2d  # torch.nn.functional.adaptive_avg_pool2d
         pyramids = []
         # current_x = x
         for level in range(0, levels):
@@ -256,7 +264,9 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict):
             scale_factor = round(scale_factors[level])
             # gauss_filtered_x = gaussian_conv2d(current_x, kernel)
             # down = downsample(gauss_filtered_x)
-            # down = downsample(x, (round(x.shape[2]//scale_factor), round(x.shape[3]//scale_factor)))
+            # down = downsample(
+            #     x, (round(x.shape[2] // scale_factor), round(x.shape[3] // scale_factor))
+            # )
             down = downsample(x, (scale_factor, scale_factor))
             # laplacian = current_x - upsample(down)
             # up = upsample(down)
@@ -356,9 +366,7 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
             :,
             target_indices[:, 1],  # switch order due to xy indexing. Don't ask.
             target_indices[:, 0],  # switch order due to xy indexing. Don't ask.
-        ] = z.permute(
-            0, 3, 1, 2
-        )
+        ] = z.permute(0, 3, 1, 2)
 
     # filter_fig, filter_ax = plt.subplots(1, 1, figsize=(5, 5))
     # g = filter_ax.imshow(foveation_filters[0].sum(axis=(0, 1)))
@@ -372,15 +380,26 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
     return foveated_image
 
 
-# def sample_foveation_gaussian(image: torch.Tensor, xy_center: torch.Tensor, fovea_radius: int, image_out_dim: int, ring_sigmas: List[float]):
-#     """Sample image according to foveation params, sampling each peripheral point based on a Gaussian function
+# def sample_foveation_gaussian(
+#     image: torch.Tensor,
+#     xy_center: torch.Tensor,
+#     fovea_radius: int,
+#     image_out_dim: int,
+#     ring_sigmas: List[float],
+# ):
+#     """Sample image according to foveation params, sampling each peripheral point based
+#     on a Gaussian function
 #     of its distance to other points in the image
 #     Sampling is done via matrix-multiplication filtering
 #     """
 #     b, c, h, w = image.shape
 
-#     assert all(0 <= xy_center[:, 0] < w), f"xy_center[0] must be in [0, {w}) (got: {xy_center[:, 0]})"
-#     assert all(0 <= xy_center[:, 1] < h), f"xy_center[1] must be in [0, {h}) (got: {xy_center[:, 1]})"
+#     assert all(
+#         0 <= xy_center[:, 0] < w
+#     ), f"xy_center[0] must be in [0, {w}) (got: {xy_center[:, 0]})"
+#     assert all(
+#         0 <= xy_center[:, 1] < h
+#     ), f"xy_center[1] must be in [0, {h}) (got: {xy_center[:, 1]})"
 #     assert h % 2 == w % 2 == 0, f"Image must be even-sized (got: {image.shape})"
 #     assert fovea_radius % 2 == 0, f"Fovea radius must be even (got: {fovea_radius})"
 #     assert image_out_dim % 2 == 0, f"Image out dim must be even (got: {image_out_dim})"
@@ -399,22 +418,28 @@ def apply_gaussian_foveation(image: torch.Tensor, foveation_params: dict):
 #     )
 
 #     def move_foveation(xy_center, foveation_params):
-#         fovea_source_indices = foveation_params["source_indices"]["fovea"] - generic_center + xy_center
+#         fovea_source_indices = (
+#             foveation_params["source_indices"]["fovea"] - generic_center + xy_center
+#         )
 #         peri_rings_source_indices = [
-#             ri - generic_center + xy_center for ri in foveation_params["source_indices"]["peripheral_rings"]
+#             ri - generic_center + xy_center
+#             for ri in foveation_params["source_indices"]["peripheral_rings"]
 #         ]
 
 #         return fovea_source_indices, peri_rings_source_indices
 
 #     fovea_source_indices, peri_rings_source_indices = move_foveation(xy_center, foveation_params)
-#     fovea_mapped_indices, peri_rings_mapped_indices = foveation_params["mapped_indices"]["fovea"], foveation_params["mapped_indices"]["peripheral_rings"]
-
+#     fovea_mapped_indices, peri_rings_mapped_indices = (
+#         foveation_params["mapped_indices"]["fovea"],
+#         foveation_params["mapped_indices"]["peripheral_rings"],
+#     )
 
 #     fov_h, fov_w = foveation_params["foveated_image_size"]
+#     _n_peri_rings = len(foveation_params['source_indices']['peripheral_rings'])
 
 #     assert len(ring_sigmas) == len(
 #         foveation_params["source_indices"]["peripheral_rings"]
-#     ), f"Must provide mu and sigma for each of {len(foveation_params['source_indices']['peripheral_rings'])} rings"
+#     ), f"Must provide mu and sigma for each of {_n_peri_rings} rings"
 
 #     # build filters
 #     foveation_filters = np.zeros((fov_h, fov_w, h, w))

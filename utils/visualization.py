@@ -31,10 +31,12 @@ def plot_gaussian_foveation_parameters(
         # fovea_points = foveation_parameters["fovea"]["mus"][i]
 
         # ax.scatter(fovea_points[:, 0], fovea_points[:, 1], s=point_size, label=f"Fovea")
-        for ring_i, ring_specs in enumerate([foveation_parameters["fovea"], *foveation_parameters["peripheral_rings"]]):
-            sigmas = 1 if ring_i==0 else ring_specs[
-                "sigmas"
-            ].mean()  # sigmas the same for all points in ring for every item in batch
+        for ring_i, ring_specs in enumerate(
+            [foveation_parameters["fovea"], *foveation_parameters["peripheral_rings"]]
+        ):
+            sigmas = (
+                1 if ring_i == 0 else ring_specs["sigmas"].mean()
+            )  # sigmas the same for all points in ring for every item in batch
 
             # plot translucent rectangle centered at mu with width and height 2*sigma
             rect_size = sigmas / 2
@@ -72,6 +74,9 @@ def plot_gaussian_foveation_parameters(
 
         # reset axes to show full image with boxes
         ax.set_xlim(min(0, ax.dataLim.x0), max(image.shape[0], ax.dataLim.x1))
-        ax.set_ylim(max(image.shape[1], ax.dataLim.y1), min(0, ax.dataLim.y0),)
+        ax.set_ylim(
+            max(image.shape[1], ax.dataLim.y1),
+            min(0, ax.dataLim.y0),
+        )
 
     return fig, axs

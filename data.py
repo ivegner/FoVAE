@@ -1,9 +1,9 @@
+from typing import Literal
 from pytorch_lightning import LightningDataModule
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
+from torch.utils.data import DataLoader, Subset
 import numpy as np
-from typing import *
 
 
 class ImageDataModule(LightningDataModule):
@@ -22,7 +22,7 @@ class ImageDataModule(LightningDataModule):
                 transform=transforms.Compose(
                     [transforms.ToTensor(), transforms.Normalize(0.5, 0.5)]
                 ),
-                download=True
+                download=True,
             )
         elif dataset == "cifar10":
             self.dataset_full = torchvision.datasets.CIFAR10(
@@ -37,18 +37,20 @@ class ImageDataModule(LightningDataModule):
                 transform=transforms.Compose(
                     [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
                 ),
-                split="train"
+                split="train",
             )
             self.dataset_val = torchvision.datasets.ImageNet(
                 root="data",
                 transform=transforms.Compose(
                     [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
                 ),
-                split="val"
+                split="val",
             )
 
     def setup(self, stage: str) -> None:
-        if stage in ("fit", "validate") and not (hasattr(self, "dataset_train") and hasattr(self, "dataset_val")):
+        if stage in ("fit", "validate") and not (
+            hasattr(self, "dataset_train") and hasattr(self, "dataset_val")
+        ):
             n_all = len(self.dataset_full)
             n_train = int(0.8 * n_all)
             n_val = n_all - n_train
@@ -74,7 +76,7 @@ class ImageDataModule(LightningDataModule):
             shuffle=True,
             num_workers=self.n_workers,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=True,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -84,7 +86,7 @@ class ImageDataModule(LightningDataModule):
             shuffle=False,
             num_workers=self.n_workers,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=True,
         )
 
     # def test_dataloader(self) -> DataLoader:

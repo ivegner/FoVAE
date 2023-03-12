@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+# import torch.nn.functional as F
+
 
 class AttentionBlock(nn.Module):
     def __init__(self, embed_dim, hidden_dim, num_heads, dropout=0.0):
@@ -30,6 +32,7 @@ class AttentionBlock(nn.Module):
         x = x + self.attn(inp_x, inp_x, inp_x)[0]
         x = x + self.linear(self.layer_norm_2(x))
         return x
+
 
 class VisionTransformer(nn.Module):
     # adapted from https://pytorch-lightning.readthedocs.io/en/stable/notebooks/course_UvA-DL/11-vision-transformer.html
@@ -67,9 +70,14 @@ class VisionTransformer(nn.Module):
         self.output_dim = output_dim
         self.input_layer = nn.Linear(input_dim, embed_dim)
         self.transformer = nn.Sequential(
-            *(AttentionBlock(embed_dim, hidden_dim, num_heads, dropout=dropout) for _ in range(num_layers))
+            *(
+                AttentionBlock(embed_dim, hidden_dim, num_heads, dropout=dropout)
+                for _ in range(num_layers)
+            )
         )
-        self.next_token_predictor = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, output_dim))
+        self.next_token_predictor = nn.Sequential(
+            nn.LayerNorm(embed_dim), nn.Linear(embed_dim, output_dim)
+        )
         self.dropout = nn.Dropout(dropout)
 
         # Parameters/Embeddings
