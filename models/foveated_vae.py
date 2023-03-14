@@ -1,6 +1,6 @@
 import gc
 from copy import deepcopy
-from typing import Iterable, List, Literal, Optional, Tuple, Union
+from typing import Any, Iterable, List, Literal, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -30,20 +30,29 @@ def _recursive_to(x, *args, **kwargs):
         return x
 
 
+@torch.jit.script
+def _reparam_sample(mu, logvar):
+    std = torch.exp(0.5 * logvar)
+    eps = torch.empty_like(mu).normal_(0.0, 1.0)
+    return mu + std * eps
+
+
 def reparam_sample(mu, logvar):
-    std = torch.exp(0.5 * logvar)  # e^(1/2 * log(std^2))
     i = 0
-    while i < 5:
+    while i < 20:
         # randn_like sometimes produces NaNs for unknown reasons
         # maybe see: https://github.com/pytorch/pytorch/issues/46155
         # so we try again if that happens
-        eps = torch.randn_like(std)  # random ~ N(0, 1)
-        if not torch.isnan(eps).any():
-            break
+        s = _reparam_sample(mu, logvar)
+        if not torch.isnan(s).any():
+            return s
+        # print(f"Could not sample without NaNs (try {i})")
         i += 1
     else:
-        raise RuntimeError("Could not sample from N(0, 1) without NaNs after 5 tries")
-    return mu + std * eps
+        print("Could not sample from N(0, 1) without NaNs after 20 tries")
+        print("mu:", mu.max(), mu.min())
+        print("logvar:", logvar.max(), logvar.min())
+        return torch.nan
 
 
 class View(nn.Module):
@@ -69,7 +78,14 @@ class FFNet(nn.Module):
         stack = []
         last_out_dim = in_dim
         for nn_out_dim in hidden_ff_out_dims:
-            stack.extend([nn.GELU(), nn.Linear(last_out_dim, nn_out_dim)])
+            stack.extend(
+                [
+                    nn.GELU(),
+                    # torch.nn.utils.parametrizations.spectral_norm(
+                    nn.Linear(last_out_dim, nn_out_dim)
+                    # ),
+                ]
+            )  # nn.utils.weight_norm, nn.BatchNorm1d(last_out_dim)
             last_out_dim = nn_out_dim
 
         self.encoder = nn.Sequential(*stack)
@@ -281,7 +297,7 @@ class NextPatchPredictor(nn.Module):
             output_dim=z_dims[-1] * 2,
             embed_dim=256,  # TODO
             hidden_dim=512,  # TODO
-            num_heads=4,  # TODO
+            num_heads=1,  # TODO
             num_layers=3,  # TODO
             dropout=0,
         )
@@ -291,7 +307,7 @@ class NextPatchPredictor(nn.Module):
             output_dim=2 * 2,
             embed_dim=256,  # TODO
             hidden_dim=512,  # TODO
-            num_heads=4,  # TODO
+            num_heads=1,  # TODO
             num_layers=3,  # TODO
             dropout=0,
         )
@@ -452,14 +468,16 @@ class FoVAE(pl.LightningModule):
         foveation_padding_mode: Literal["zeros", "replicate"] = "replicate",
         lr=1e-3,
         beta=1,
+        # n_spectral_iter=1,
         # grad_clip=100,
-        grad_skip_threshold=1000,
+        grad_skip_threshold=-1,
         # do_add_pos_encoding=True,
         do_z_pred_cond_from_top=True,
         do_use_beta_norm=True,
         do_random_foveation=False,
         do_image_reconstruction=True,
         do_next_patch_prediction=True,
+        reconstruct_fovea_only=False
     ):
         super().__init__()
 
@@ -477,6 +495,11 @@ class FoVAE(pl.LightningModule):
         self.foveation_padding = foveation_padding
         self.foveation_padding_mode = foveation_padding_mode
 
+        # left/right singular vectors used for SR
+        self.n_spectral_power_iter = 1  # n_spectral_iter
+        self.sr_u = {}
+        self.sr_v = {}
+
         input_dim = self.patch_dim * self.patch_dim * self.num_channels
 
         if n_vae_levels == 1:
@@ -487,7 +510,7 @@ class FoVAE(pl.LightningModule):
             LVAE_GEN_HIDDEN_DIMS = [[256, 256]]
         elif n_vae_levels == 2:
             VAE_LADDER_DIMS = [32, 32]
-            VAE_Z_DIMS = [z_dim, z_dim//2]
+            VAE_Z_DIMS = [z_dim, z_dim // 2]
             LADDER_HIDDEN_DIMS = [[512, 512], [256, 256]]
             LVAE_INF_HIDDEN_DIMS = [[256, 256], [128, 128]]
             LVAE_GEN_HIDDEN_DIMS = [[256, 256], [128, 128]]
@@ -501,6 +524,17 @@ class FoVAE(pl.LightningModule):
             z_dims=VAE_Z_DIMS,
             do_random_foveation=do_random_foveation,
         )
+
+        self.ff_layers = []
+        # self.all_conv_layers = []
+        # self.all_bn_layers = []
+        for n, layer in self.named_modules():
+            # if isinstance(layer, Conv2D) and '_ops' in n:   # only chose those in cell
+            if isinstance(layer, nn.Linear):
+                self.ff_layers.append(layer)
+            # if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.SyncBatchNorm) or \
+            #         isinstance(layer, SyncBatchNormSwish):
+            #     self.all_bn_layers.append(layer)
 
         self._beta = beta
 
@@ -524,6 +558,7 @@ class FoVAE(pl.LightningModule):
             next_patch_recon=1,
             next_patch_kl=beta_vae,
             image_recon=20,
+            spectral_norm=0,
         )
 
         # image: (b, c, image_dim[0], image_dim[1])
@@ -539,6 +574,7 @@ class FoVAE(pl.LightningModule):
         self.do_random_foveation = do_random_foveation
         self.do_image_reconstruction = do_image_reconstruction
         self.do_next_patch_prediction = do_next_patch_prediction
+        self.reconstruct_fovea_only = reconstruct_fovea_only
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -571,6 +607,7 @@ class FoVAE(pl.LightningModule):
 
         def memoized_patch_getter(x_full):
             _fov_memo = None
+
             def get_patch_from_pos(pos):
                 # TODO: investigate why reshape vs. view is needed
                 nonlocal _fov_memo
@@ -578,6 +615,7 @@ class FoVAE(pl.LightningModule):
                 patch = patch.reshape(b, -1)
                 assert patch.shape == (b, self.num_channels * self.patch_dim * self.patch_dim)
                 return patch
+
             return get_patch_from_pos
 
         get_patch_from_pos = memoized_patch_getter(x_full)
@@ -638,9 +676,13 @@ class FoVAE(pl.LightningModule):
             # calculate losses
 
             # calculate rec and kl losses for current patch
-            _curr_patch_rec_loss = -1 * gaussian_likelihood(
-                curr_patch, curr_patch_dict["sample_zs"][0]
+            _curr_patch_rec_loss = -1 * self._patch_likelihood(
+                curr_patch,
+                mu=curr_patch_dict["mu_logvars_gen"][0][0],
+                logvar=curr_patch_dict["mu_logvars_gen"][0][1],
+                fovea_only=self.reconstruct_fovea_only,
             )
+
             _curr_patch_kl_divs = []
             for i, (mu, logvar) in enumerate(curr_patch_dict["mu_logvars_gen"]):
                 kl = gaussian_kl_divergence(mu=mu, logvar=logvar)
@@ -663,21 +705,26 @@ class FoVAE(pl.LightningModule):
             _next_patch_rec_losses, _next_patch_kl_divs = [], []
             if self.do_next_patch_prediction and len(gen_patch_zs) > 1:
                 # -2 because -1 is the current step, and -2 is the previous step
-                prev_step_gen_sample_zs = gen_patch_zs[-2]
+                prev_gen_patch_dict = gen_patch_dicts[-2]
                 _next_patch_rec_losses, _next_patch_kl_divs = [], []
-                for i in range(len(prev_step_gen_sample_zs)):
+                for i, (mu, logvar) in enumerate(
+                    prev_gen_patch_dict["generation"]["mu_logvars_gen"]
+                ):
                     if i == 0:
                         # input-level, compare against real patch
-                        level_rec_loss = -1 * gaussian_likelihood(
-                            curr_patch, prev_step_gen_sample_zs[i]
+                        level_rec_loss = -1 * self._patch_likelihood(
+                            curr_patch, mu=mu, logvar=logvar, fovea_only=self.reconstruct_fovea_only
                         )
                     else:
-                        level_rec_loss = -1 * gaussian_likelihood(
-                            curr_patch_dict["sample_zs"][i], prev_step_gen_sample_zs[i]
+                        level_rec_loss = -1 * self._patch_likelihood(
+                            curr_patch_dict["sample_zs"][i],
+                            mu=mu,
+                            logvar=logvar,
+                            # fovea_only=self.reconstruct_fovea_only,
                         )
                     level_kl = gaussian_kl_divergence(
-                        mu=next_patch_dict["generation"]["mu_logvars_gen"][i][0],
-                        logvar=next_patch_dict["generation"]["mu_logvars_gen"][i][1],
+                        mu=mu,
+                        logvar=logvar,
                     )
                     if i == 0 and not DO_KL_ON_INPUT_LEVEL:
                         level_kl = torch.zeros_like(level_kl)
@@ -720,7 +767,7 @@ class FoVAE(pl.LightningModule):
 
         if self.do_image_reconstruction:
             image_reconstruction_loss, _ = self._reconstruct_image(
-                real_patch_zs, x_full, return_patches=False
+                real_patch_zs, x_full, return_patches=False, fovea_only=self.reconstruct_fovea_only
             )
         else:
             image_reconstruction_loss = torch.tensor(0.0, device=self.device)
@@ -762,6 +809,11 @@ class FoVAE(pl.LightningModule):
             )
 
         image_reconstruction_loss = self.betas["image_recon"] * image_reconstruction_loss
+        spectral_norm = (
+            self.betas["spectral_norm"] * self.spectral_norm_parallel()
+            if self.betas["spectral_norm"] > 0
+            else 0.0
+        )
 
         total_loss = (
             curr_patch_rec_total_loss
@@ -770,6 +822,7 @@ class FoVAE(pl.LightningModule):
             + next_patch_rec_total_loss
             + next_patch_kl_div_total_loss
             + image_reconstruction_loss
+            + spectral_norm
         )
 
         return dict(
@@ -782,6 +835,7 @@ class FoVAE(pl.LightningModule):
                 next_patch_rec_loss=next_patch_rec_total_loss,
                 next_patch_kl_loss=next_patch_kl_div_total_loss,
                 image_reconstruction_loss=image_reconstruction_loss,
+                spectral_norm=spectral_norm,
             ),
             losses_by_layer=dict(
                 curr_patch_kl_divs_by_layer=curr_patch_kl_divs_by_layer,  # n_levels
@@ -800,10 +854,20 @@ class FoVAE(pl.LightningModule):
             ),
         )
 
+    def _patch_likelihood(self, patch, mu, logvar, fovea_only=False):
+        if fovea_only:
+            return gaussian_likelihood(
+                self._patch_to_fovea(patch),
+                mu=self._patch_to_fovea(mu),
+                logvar=self._patch_to_fovea(logvar),
+            )
+        else:
+            return gaussian_likelihood(patch, mu=mu, logvar=logvar)
+
     def _get_random_foveation_pos(self, batch_size: int):
         return self.next_patch_predictor._get_random_foveation_pos(batch_size, device=self.device)
 
-    def _reconstruct_image(self, sample_zs, image: Optional[torch.Tensor], return_patches=False):
+    def _reconstruct_image(self, sample_zs, image: Optional[torch.Tensor], return_patches=False, fovea_only=False):
         # positions span [-1, 1] in both x and y
 
         b = sample_zs[0][0].size(0)
@@ -819,10 +883,12 @@ class FoVAE(pl.LightningModule):
 
         def memoized_patch_getter(image):
             _fov_memo = None
+
             def get_patch_from_pos(pos):
                 nonlocal _fov_memo
                 patch, _fov_memo = self._foveate_to_loc(image, pos, _fov_memo=_fov_memo)
                 return patch
+
             return get_patch_from_pos
 
         # predict zs for each position
@@ -836,6 +902,7 @@ class FoVAE(pl.LightningModule):
         for i, position in enumerate(positions):
             gen_dict = self._gen_next_patch(gen_zs, forced_next_location=position)
             gen_patch = gen_dict["generation"]["sample_zs"][0]
+            gen_mu, gen_logvar = gen_dict["generation"]["mu_logvars_gen"][0]
             # gen_zs.append(gen_dict["generation"]["sample_zs"])
             gen_patch = gen_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)
             if image is not None:
@@ -843,10 +910,13 @@ class FoVAE(pl.LightningModule):
                     image_recon_loss = 0.0
                 real_patch = _memo_foveate_to_loc(position)
                 assert torch.is_same_size(gen_patch, real_patch)
-                # TODO: mask to fovea only
-                patch_recon_loss = -1 * gaussian_likelihood(real_patch, gen_patch)
+
+                patch_recon_loss = -1 * self._patch_likelihood(
+                    real_patch.view(b, -1), mu=gen_mu, logvar=gen_logvar, fovea_only=fovea_only
+                )
                 image_recon_loss += patch_recon_loss
-            patches.append(gen_patch)
+
+            patches.append(self._patch_to_fovea(gen_patch) if fovea_only else gen_patch)
 
         if image_recon_loss is not None:
             image_recon_loss /= positions.size(0)
@@ -856,7 +926,7 @@ class FoVAE(pl.LightningModule):
         else:
             return image_recon_loss, None
 
-    def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor, _fov_memo: dict=None):
+    def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor, _fov_memo: dict = None):
         # image: (b, c, h, w)
         # loc: (b, 2), where entries are in [-1, 1]
         # filters: (out_h, out_w, rf_h, rf_w)
@@ -998,6 +1068,61 @@ class FoVAE(pl.LightningModule):
         assert x_full.size() == torch.Size([b, c + 2, h, w])
         return x_full
 
+    def spectral_norm_parallel(self):
+        """This method computes spectral normalization for all FF layers in parallel.
+
+        This method should be called after calling the forward method of all the
+        FF layers in each iteration.
+
+        Adapted from https://github.com/NVlabs/NVAE
+        """
+        weights = {}  # a dictionary indexed by the shape of weights
+        for l in self.ff_layers:
+            weight = l.weight
+            weight_mat = weight.view(weight.size(0), -1)
+            if weight_mat.shape not in weights:
+                weights[weight_mat.shape] = []
+
+            weights[weight_mat.shape].append(weight_mat)
+
+        loss = 0
+        device = self.device
+        for i in weights:
+            weights[i] = torch.stack(weights[i], dim=0)
+            with torch.no_grad():
+                num_iter = self.n_spectral_power_iter
+                if i not in self.sr_u:
+                    num_w, row, col = weights[i].shape
+                    self.sr_u[i] = F.normalize(
+                        torch.ones(num_w, row).normal_(0, 1).to(device), dim=1, eps=1e-3
+                    )
+                    self.sr_v[i] = F.normalize(
+                        torch.ones(num_w, col).normal_(0, 1).to(device), dim=1, eps=1e-3
+                    )
+                    # increase the number of iterations for the first time
+                    num_iter = 10 * self.n_spectral_power_iter
+
+                for j in range(num_iter):
+                    # Spectral norm of weight equals to `u^T W v`, where `u` and `v`
+                    # are the first left and right singular vectors.
+                    # This power iteration produces approximations of `u` and `v`.
+                    self.sr_v[i] = F.normalize(
+                        torch.matmul(self.sr_u[i].unsqueeze(1), weights[i]).squeeze(1),
+                        dim=1,
+                        eps=1e-3,
+                    )  # bx1xr * bxrxc --> bx1xc --> bxc
+                    self.sr_u[i] = F.normalize(
+                        torch.matmul(weights[i], self.sr_v[i].unsqueeze(2)).squeeze(2),
+                        dim=1,
+                        eps=1e-3,
+                    )  # bxrxc * bxcx1 --> bxrx1  --> bxr
+
+            sigma = torch.matmul(
+                self.sr_u[i].unsqueeze(1), torch.matmul(weights[i], self.sr_v[i].unsqueeze(2))
+            )
+            loss += torch.sum(sigma)
+        return loss
+
     # # generate n=num images using the model
     # def generate(self, num: int):
     #     self.eval()
@@ -1030,6 +1155,22 @@ class FoVAE(pl.LightningModule):
     #             result.append(im)
 
     #     return result
+
+    def _patch_to_fovea(self, patch: torch.Tensor):
+        assert patch.ndim in (2, 4)
+        if patch.ndim == 2:
+            p = patch.view(-1, self.num_channels, self.patch_dim, self.patch_dim)
+        else:
+            p = patch
+
+        ring_radius = self.patch_dim // 2 - self.fovea_radius
+        fovea_dim = self.fovea_radius * 2
+
+        fovea = p[:, :, ring_radius:-ring_radius, ring_radius:-ring_radius]
+        if patch.ndim == 2:
+            return fovea.reshape(-1, self.num_channels * fovea_dim * fovea_dim)
+        else:
+            return fovea
 
     def generate_patch_from_z(self, z, z_level=-1):
         if z_level != -1:
@@ -1077,7 +1218,7 @@ class FoVAE(pl.LightningModule):
             print("Skipping update!", forward_out["losses"])
 
         self.log(
-            "n_skipped_steps",
+            "n_skipped_nan",
             skip_update,
             on_epoch=True,
             on_step=False,
@@ -1241,33 +1382,35 @@ class FoVAE(pl.LightningModule):
 
             plt.close("all")
 
-            if self.do_image_reconstruction:
-                _, reconstructed_images = self._reconstruct_image(
-                    [[level[:N_TO_PLOT] for level in step] for step in step_sample_zs],
-                    image=None,
-                    return_patches=True,
-                ).cpu()
+            # if self.do_image_reconstruction:
+            _, reconstructed_images = self._reconstruct_image(
+                [[level[:N_TO_PLOT] for level in step] for step in step_sample_zs],
+                image=None,
+                return_patches=True,
+            )
+            reconstructed_images = reconstructed_images.cpu()
 
-                ring_radius = self.patch_dim // 2 - self.fovea_radius
-
-
-                for i in range(N_TO_PLOT):
-                    # ax = axs[i]
-                    # imshow_unnorm(patches[i].cpu(), ax=ax)
-                    # ax.set_title(
-                    #     f"Next patch pred. at step {step} - "
-                    #     f"({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
-                    #     fontsize=8,
-                    # )
-                    tensorboard.add_image(
-                        f"Image Reconstructions {i}",
-                        torchvision.utils.make_grid(
-                            remove_pos_channels_from_batch(reconstructed_images[i])[:, :, ring_radius:-ring_radius, ring_radius:-ring_radius] / 2 + 0.5,
-                            nrow=int(np.sqrt(len(reconstructed_images[i]))),
-                            padding=1
-                        ),
-                        global_step=self.global_step,
-                    )
+            for i in range(N_TO_PLOT):
+                # ax = axs[i]
+                # imshow_unnorm(patches[i].cpu(), ax=ax)
+                # ax.set_title(
+                #     f"Next patch pred. at step {step} - "
+                #     f"({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
+                #     fontsize=8,
+                # )
+                tensorboard.add_image(
+                    f"Image Reconstructions {i}",
+                    torchvision.utils.make_grid(
+                        remove_pos_channels_from_batch(
+                            self._patch_to_fovea(reconstructed_images[i])
+                        )
+                        / 2
+                        + 0.5,
+                        nrow=int(np.sqrt(len(reconstructed_images[i]))),
+                        padding=1,
+                    ),
+                    global_step=self.global_step,
+                )
 
             # step constant bc real images don't change
             tensorboard.add_images(
@@ -1383,6 +1526,61 @@ class FoVAE(pl.LightningModule):
             on_tpu=on_tpu,
             using_lbfgs=using_lbfgs,
         )
+
+        # def _optimizer_step(self, loss):
+        #     opt = self.optimizers()
+        #     opt.zero_grad()
+        #     self.manual_backward(loss)
+
+        # grad_norm = self.clip_gradients(opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm")
+        # grad_norm = _get_grad_norm()
+
+        # only update if loss is not NaN and if the grad norm is below a specific threshold
+        skipped_update = 1
+        # if self.grad_skip_threshold == -1 or grad_norm < self.grad_skip_threshold:
+        #     skipped_update = 0
+        #     optimizer.step(closure=optimizer_closure)
+        #     # TODO: EMA updating
+        #     # TODO: factor out loss NaNs by what produced them (kl or reconstruction)
+        #     # update_ema(vae, ema_vae, H.ema_rate)
+        # else:
+        #     # call the closure by itself to run `training_step` + `backward` without
+        #     # an optimizer step
+        #     optimizer_closure()
+
+    # def backward(self, loss, optimizer, optimizer_idx, *args: Any, **kwargs: Any) -> None:
+    #     return super().backward(loss, optimizer, optimizer_idx, *args, **kwargs)
+
+    def on_after_backward(self) -> None:
+        # only update if the grad norm is below a specific threshold
+        grad_norm = self._get_grad_norm()
+        skipped_update = 0.0
+        if self.grad_skip_threshold > 0 and grad_norm > self.grad_skip_threshold:
+            skipped_update = 1.0
+            for p in self.parameters():
+                if p.grad is not None:
+                    p.grad = None
+
+        self.log(
+            "n_skipped_grad",
+            skipped_update,
+            on_epoch=True,
+            on_step=False,
+            logger=True,
+            prog_bar=True,
+            reduce_fx=torch.sum,
+        )
+
+        return super().on_after_backward()
+
+    def _get_grad_norm(self):
+        total_norm = 0
+        parameters = [p for p in self.parameters() if p.grad is not None and p.requires_grad]
+        for p in parameters:
+            param_norm = p.grad.detach().data.norm(2)
+            total_norm += param_norm.item() ** 2
+        total_norm = total_norm**0.5
+        return total_norm
 
     def on_train_epoch_end(self) -> None:
         k = super().on_train_epoch_end()

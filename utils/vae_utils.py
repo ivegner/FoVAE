@@ -1,17 +1,23 @@
 from typing import Optional
 import torch
 
-
-def gaussian_likelihood(x, x_hat, logscale=1.0, reduce="mean"):
+# @torch.jit.script
+def gaussian_likelihood(x: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor, reduce="mean"):
     try:
-        scale = torch.exp(torch.ones_like(x_hat) * logscale)
-        mean = x_hat
-        dist = torch.distributions.Normal(mean, scale)
+        # scale = torch.exp(torch.ones_like(x_hat) * logscale)
+        # mean = x_hat
+        assert x.shape == mu.shape == logvar.shape, (
+            f"Shapes of x, mu and logvar must match. Got {x.shape}, {mu.shape}, {logvar.shape}"
+        )
+        std = torch.exp(0.5 * logvar)
+        dist = torch.distributions.Normal(mu, std)
 
         # measure prob of seeing image under p(x|z)
         log_pxz = dist.log_prob(x)
 
-        s = log_pxz.sum(dim=1)
+        # s = log_pxz.sum(dim=1)
+        s = log_pxz.mean(dim=1) # CHANGED!
+        # s = -torch.nn.functional.mse_loss(x, mu)
 
     except ValueError as e:
         print(e)
@@ -27,7 +33,7 @@ def gaussian_likelihood(x, x_hat, logscale=1.0, reduce="mean"):
         raise ValueError(f"Unknown reduce value: {reduce}")
     return s
 
-
+# @torch.jit.script
 def gaussian_kl_divergence(
     mu: torch.Tensor,
     std: Optional[torch.Tensor] = None,
