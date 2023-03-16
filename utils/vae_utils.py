@@ -6,6 +6,11 @@ def gaussian_likelihood(x: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor,
     try:
         # scale = torch.exp(torch.ones_like(x_hat) * logscale)
         # mean = x_hat
+        if mu.ndim == 1:
+            mu = mu.unsqueeze(0).expand_as(x)
+        if logvar.ndim == 1:
+            logvar = logvar.unsqueeze(0).expand_as(x)
+
         assert x.shape == mu.shape == logvar.shape, (
             f"Shapes of x, mu and logvar must match. Got {x.shape}, {mu.shape}, {logvar.shape}"
         )

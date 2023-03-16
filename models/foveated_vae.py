@@ -95,7 +95,12 @@ class FFNet(nn.Module):
 
 
 class Ladder(nn.Module):
-    def __init__(self, in_dim: int, layer_out_dims: List[int], layer_hidden_dims: List[List[int]]):
+    def __init__(
+        self,
+        in_dim: int,
+        layer_out_dims: List[int],
+        layer_hidden_dims: Optional[List[List[int]]] = None,
+    ):
         super().__init__()
         self.layer_out_dims = layer_out_dims
 
@@ -106,7 +111,7 @@ class Ladder(nn.Module):
                 FFNet(
                     layer_out_dims[i],
                     layer_out_dims[i + 1],
-                    hidden_ff_out_dims=layer_hidden_dims[i],
+                    hidden_ff_out_dims=layer_hidden_dims[i] if layer_hidden_dims else None,
                 )
                 for i in range(len(layer_out_dims) - 1)
             ]
@@ -127,20 +132,32 @@ class LadderVAE(nn.Module):
         in_dim: int,
         ladder_dims: List[int],
         z_dims: List[int],
-        inference_hidden_dims: List[List[int]],
-        generative_hidden_dims: List[List[int]],
+        inference_hidden_dims: Optional[List[List[int]]] = None,
+        generative_hidden_dims: Optional[List[List[int]]] = None,
     ):
         super().__init__()
 
         n_vae_layers = len(ladder_dims)
 
-        assert (
-            n_vae_layers == len(z_dims) == len(inference_hidden_dims) == len(generative_hidden_dims)
-        ), "All LadderVAE spec parameters must have same length"
+        assert n_vae_layers == len(z_dims), "All LadderVAE spec parameters must have same length"
+
+        if inference_hidden_dims is not None:
+            assert n_vae_layers == len(
+                inference_hidden_dims
+            ), "Must have same number of inference layer specs as ladder layers"
+
+        if generative_hidden_dims is not None:
+            assert n_vae_layers == len(
+                generative_hidden_dims
+            ), "Must have same number of generative layer specs as ladder layers"
 
         self.inference_layers = nn.ModuleList(
             [
-                FFNet(ladder_dims[i], z_dims[i] * 2, hidden_ff_out_dims=inference_hidden_dims[i])
+                FFNet(
+                    ladder_dims[i],
+                    z_dims[i] * 2,
+                    hidden_ff_out_dims=inference_hidden_dims[i] if inference_hidden_dims else None,
+                )
                 for i in range(n_vae_layers)
             ]
         )
@@ -148,7 +165,13 @@ class LadderVAE(nn.Module):
         _z_dims = [in_dim, *z_dims]
         self.generative_layers = nn.ModuleList(
             [
-                FFNet(_z_dims[i + 1], _z_dims[i] * 2, hidden_ff_out_dims=generative_hidden_dims[i])
+                FFNet(
+                    _z_dims[i + 1],
+                    _z_dims[i] * 2,
+                    hidden_ff_out_dims=generative_hidden_dims[i]
+                    if generative_hidden_dims
+                    else None,
+                )
                 for i in range(n_vae_layers)
             ]
         )
@@ -295,8 +318,8 @@ class NextPatchPredictor(nn.Module):
         self.top_z_predictor = VisionTransformer(
             input_dim=z_dims[-1] + 2,  # 2 for concatenated next position
             output_dim=z_dims[-1] * 2,
-            embed_dim=256,  # TODO
-            hidden_dim=512,  # TODO
+            embed_dim=64,  # TODO
+            hidden_dim=128,  # TODO
             num_heads=1,  # TODO
             num_layers=3,  # TODO
             dropout=0,
@@ -305,8 +328,8 @@ class NextPatchPredictor(nn.Module):
         self.next_location_predictor = VisionTransformer(
             input_dim=z_dims[-1],
             output_dim=2 * 2,
-            embed_dim=256,  # TODO
-            hidden_dim=512,  # TODO
+            embed_dim=64,  # TODO
+            hidden_dim=128,  # TODO
             num_heads=1,  # TODO
             num_layers=3,  # TODO
             dropout=0,
@@ -477,7 +500,7 @@ class FoVAE(pl.LightningModule):
         do_random_foveation=False,
         do_image_reconstruction=True,
         do_next_patch_prediction=True,
-        reconstruct_fovea_only=False
+        reconstruct_fovea_only=False,
     ):
         super().__init__()
 
@@ -500,18 +523,18 @@ class FoVAE(pl.LightningModule):
         self.sr_u = {}
         self.sr_v = {}
 
-        input_dim = self.patch_dim * self.patch_dim * self.num_channels
+        input_dim = self.num_channels * self.patch_dim * self.patch_dim
 
         if n_vae_levels == 1:
-            VAE_LADDER_DIMS = [32]
+            VAE_LADDER_DIMS = [25]
             VAE_Z_DIMS = [z_dim]
-            LADDER_HIDDEN_DIMS = [[512, 512]]
-            LVAE_INF_HIDDEN_DIMS = [[256, 256]]
-            LVAE_GEN_HIDDEN_DIMS = [[256, 256]]
+            LADDER_HIDDEN_DIMS = None  # [[65]] #[[256, 256]]
+            LVAE_INF_HIDDEN_DIMS = None  # [[65]] #[[256, 256]]
+            LVAE_GEN_HIDDEN_DIMS = None  # [[65]] #[[256, 256]]
         elif n_vae_levels == 2:
-            VAE_LADDER_DIMS = [32, 32]
-            VAE_Z_DIMS = [z_dim, z_dim // 2]
-            LADDER_HIDDEN_DIMS = [[512, 512], [256, 256]]
+            VAE_LADDER_DIMS = [25, 16]
+            VAE_Z_DIMS = [z_dim, z_dim]
+            LADDER_HIDDEN_DIMS = [[256, 256], [128, 128]]
             LVAE_INF_HIDDEN_DIMS = [[256, 256], [128, 128]]
             LVAE_GEN_HIDDEN_DIMS = [[256, 256], [128, 128]]
 
@@ -524,6 +547,8 @@ class FoVAE(pl.LightningModule):
             z_dims=VAE_Z_DIMS,
             do_random_foveation=do_random_foveation,
         )
+        # self.patch_noise_logvar = nn.Parameter(torch.ones(input_dim), requires_grad=True)
+        self.patch_noise_logvar = nn.Parameter(torch.tensor([0.0]), requires_grad=True)
 
         self.ff_layers = []
         # self.all_conv_layers = []
@@ -678,8 +703,10 @@ class FoVAE(pl.LightningModule):
             # calculate rec and kl losses for current patch
             _curr_patch_rec_loss = -1 * self._patch_likelihood(
                 curr_patch,
-                mu=curr_patch_dict["mu_logvars_gen"][0][0],
-                logvar=curr_patch_dict["mu_logvars_gen"][0][1],
+                mu=curr_patch_dict["sample_zs"][0],
+                logvar=self.patch_noise_logvar,
+                # mu=curr_patch_dict["sample_zs"][0],
+                # logvar=torch.ones_like(curr_patch_dict["mu_logvars_gen"][0][0]),
                 fovea_only=self.reconstruct_fovea_only,
             )
 
@@ -713,8 +740,11 @@ class FoVAE(pl.LightningModule):
                     if i == 0:
                         # input-level, compare against real patch
                         level_rec_loss = -1 * self._patch_likelihood(
-                            curr_patch, mu=mu, logvar=logvar, fovea_only=self.reconstruct_fovea_only
+                            curr_patch, mu=mu, logvar=self.patch_noise_logvar, fovea_only=self.reconstruct_fovea_only
                         )
+                        # level_rec_loss = -1 * self._patch_likelihood(
+                        #     curr_patch, mu=mu, logvar=torch.ones_like(mu), fovea_only=self.reconstruct_fovea_only
+                        # )
                     else:
                         level_rec_loss = -1 * self._patch_likelihood(
                             curr_patch_dict["sample_zs"][i],
@@ -867,7 +897,9 @@ class FoVAE(pl.LightningModule):
     def _get_random_foveation_pos(self, batch_size: int):
         return self.next_patch_predictor._get_random_foveation_pos(batch_size, device=self.device)
 
-    def _reconstruct_image(self, sample_zs, image: Optional[torch.Tensor], return_patches=False, fovea_only=False):
+    def _reconstruct_image(
+        self, sample_zs, image: Optional[torch.Tensor], return_patches=False, fovea_only=False
+    ):
         # positions span [-1, 1] in both x and y
 
         b = sample_zs[0][0].size(0)
@@ -912,8 +944,11 @@ class FoVAE(pl.LightningModule):
                 assert torch.is_same_size(gen_patch, real_patch)
 
                 patch_recon_loss = -1 * self._patch_likelihood(
-                    real_patch.view(b, -1), mu=gen_mu, logvar=gen_logvar, fovea_only=fovea_only
+                    real_patch.view(b, -1), mu=gen_mu, logvar=self.patch_noise_logvar, fovea_only=fovea_only
                 )
+                # patch_recon_loss = -1 * self._patch_likelihood(
+                #     real_patch.view(b, -1), mu=gen_mu, logvar=torch.ones_like(gen_mu), fovea_only=fovea_only
+                # )
                 image_recon_loss += patch_recon_loss
 
             patches.append(self._patch_to_fovea(gen_patch) if fovea_only else gen_patch)
@@ -1210,6 +1245,8 @@ class FoVAE(pl.LightningModule):
         total_loss = forward_out["losses"]["total_loss"]
         # self.log("train_total_loss", total_loss, prog_bar=True)
         self.log_dict({"train_" + k: v for k, v in forward_out["losses"].items()})
+        patch_noise_logvar_mean = self.patch_noise_logvar.mean()
+        self.log("patch_noise_logvar_mean", patch_noise_logvar_mean, logger=True, on_step=True)
 
         # self._optimizer_step(loss)
         # TODO: skip on grad norm
@@ -1517,7 +1554,7 @@ class FoVAE(pl.LightningModule):
         on_tpu=False,
         using_lbfgs=False,
     ):
-        super().optimizer_step(
+        g = super().optimizer_step(
             epoch,
             batch_idx,
             optimizer,
@@ -1526,40 +1563,41 @@ class FoVAE(pl.LightningModule):
             on_tpu=on_tpu,
             using_lbfgs=using_lbfgs,
         )
+        grad_norm, param_norms = self._get_grad_norm()
 
-        # def _optimizer_step(self, loss):
-        #     opt = self.optimizers()
-        #     opt.zero_grad()
-        #     self.manual_backward(loss)
-
-        # grad_norm = self.clip_gradients(opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm")
-        # grad_norm = _get_grad_norm()
-
-        # only update if loss is not NaN and if the grad norm is below a specific threshold
-        skipped_update = 1
-        # if self.grad_skip_threshold == -1 or grad_norm < self.grad_skip_threshold:
-        #     skipped_update = 0
-        #     optimizer.step(closure=optimizer_closure)
-        #     # TODO: EMA updating
-        #     # TODO: factor out loss NaNs by what produced them (kl or reconstruction)
-        #     # update_ema(vae, ema_vae, H.ema_rate)
-        # else:
-        #     # call the closure by itself to run `training_step` + `backward` without
-        #     # an optimizer step
-        #     optimizer_closure()
+        self.log(
+            "max_grad_norm_clipped",
+            max(param_norms) if len(param_norms) > 0 else -1,
+            on_epoch=True,
+            on_step=False,
+            logger=True,
+            prog_bar=True,
+            reduce_fx=torch.max,
+        )
+        return g
 
     # def backward(self, loss, optimizer, optimizer_idx, *args: Any, **kwargs: Any) -> None:
     #     return super().backward(loss, optimizer, optimizer_idx, *args, **kwargs)
 
     def on_after_backward(self) -> None:
         # only update if the grad norm is below a specific threshold
-        grad_norm = self._get_grad_norm()
+        grad_norm, param_norms = self._get_grad_norm()
         skipped_update = 0.0
         if self.grad_skip_threshold > 0 and grad_norm > self.grad_skip_threshold:
             skipped_update = 1.0
             for p in self.parameters():
                 if p.grad is not None:
                     p.grad = None
+
+        self.log(
+            "max_grad_norm_unclipped",
+            max(param_norms) if len(param_norms) > 0 else -1,
+            on_epoch=True,
+            on_step=False,
+            logger=True,
+            prog_bar=True,
+            reduce_fx=torch.max,
+        )
 
         self.log(
             "n_skipped_grad",
@@ -1576,11 +1614,13 @@ class FoVAE(pl.LightningModule):
     def _get_grad_norm(self):
         total_norm = 0
         parameters = [p for p in self.parameters() if p.grad is not None and p.requires_grad]
+        parameter_norms = []
         for p in parameters:
             param_norm = p.grad.detach().data.norm(2)
+            parameter_norms.append(param_norm.item())
             total_norm += param_norm.item() ** 2
         total_norm = total_norm**0.5
-        return total_norm
+        return total_norm, parameter_norms
 
     def on_train_epoch_end(self) -> None:
         k = super().on_train_epoch_end()
