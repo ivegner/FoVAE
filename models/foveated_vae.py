@@ -528,9 +528,9 @@ class FoVAE(pl.LightningModule):
         if n_vae_levels == 1:
             VAE_LADDER_DIMS = [25]
             VAE_Z_DIMS = [z_dim]
-            LADDER_HIDDEN_DIMS = None  # [[65]] #[[256, 256]]
-            LVAE_INF_HIDDEN_DIMS = None  # [[65]] #[[256, 256]]
-            LVAE_GEN_HIDDEN_DIMS = None  # [[65]] #[[256, 256]]
+            LADDER_HIDDEN_DIMS = [[256, 256]]  # [[65]] #[[256, 256]]
+            LVAE_INF_HIDDEN_DIMS = [[256, 256]]  # [[65]] #[[256, 256]]
+            LVAE_GEN_HIDDEN_DIMS = [[256, 256]]  # [[65]] #[[256, 256]]
         elif n_vae_levels == 2:
             VAE_LADDER_DIMS = [25, 16]
             VAE_Z_DIMS = [z_dim, z_dim]
