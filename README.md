@@ -3,7 +3,8 @@
 Decent README pending
 
 ### Training with default arguments (on MPS):
+See `default_configs/` for the default configs, which you can override.
 
 ```
-python main.py fit --trainer default_configs/trainer.yaml --data default_configs/data_mnist.yaml --model default_configs/model_mnist.yaml [...override args here]
+python main.py fit --config experiment_overrides.yaml
 ```

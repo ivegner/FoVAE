@@ -819,7 +819,7 @@ class FoVAE(pl.LightningModule):
         interpolation = torch.arange(-range_limit, range_limit + 0.1, step)
         samples = []
         with torch.no_grad():
-            for row in range(self.z_dims[0]):
+            for row in range(self.z_dims[z_level]):
                 row_samples = []
                 # copy to CPU to bypass https://github.com/pytorch/pytorch/issues/94390
                 interp_z = z.clone().to("cpu")
@@ -1105,7 +1105,7 @@ class FoVAE(pl.LightningModule):
                 tensorboard.add_image(
                     "Absolute Latent Traversal",
                     torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[0]
+                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[-1]
                     ),
                     global_step=self.global_step,
                 )
@@ -1117,7 +1117,7 @@ class FoVAE(pl.LightningModule):
                 tensorboard.add_image(
                     "Latent Traversal Around Z",
                     torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[0]
+                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[-1]
                     ),
                     global_step=self.global_step,
                 )

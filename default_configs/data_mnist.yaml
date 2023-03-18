@@ -1,3 +1,4 @@
-dataset: mnist
-num_workers: 2
-persistent_workers: true
+data:
+  dataset: mnist
+  num_workers: 2
+  persistent_workers: true
