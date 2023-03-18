@@ -128,3 +128,29 @@ def free_bits_kl(
     # if batch_average:
     #     return kl.mean(0).clamp(min=free_bits)
     return kl.clamp(min=free_bits) # .mean(0)
+
+
+@torch.jit.script
+def _reparam_sample(mu, logvar):
+    std = torch.exp(0.5 * logvar)
+    eps = torch.empty_like(mu).normal_(0.0, 1.0)
+    return mu + std * eps
+
+
+def reparam_sample(mu, logvar):
+    i = 0
+    while i < 20:
+        # randn_like sometimes produces NaNs for unknown reasons
+        # maybe see: https://github.com/pytorch/pytorch/issues/46155
+        # so we try again if that happens
+        s = _reparam_sample(mu, logvar)
+        if not torch.isnan(s).any():
+            return s
+        # print(f"Could not sample without NaNs (try {i})")
+        i += 1
+    else:
+        print("Could not sample from N(0, 1) without NaNs after 20 tries")
+        print("mu:", mu.max(), mu.min())
+        print("logvar:", logvar.max(), logvar.min())
+        return torch.empty_like(mu).fill_(torch.nan)
+
