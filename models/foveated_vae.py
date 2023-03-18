@@ -54,7 +54,7 @@ def reparam_sample(mu, logvar):
         print("Could not sample from N(0, 1) without NaNs after 20 tries")
         print("mu:", mu.max(), mu.min())
         print("logvar:", logvar.max(), logvar.min())
-        return torch.nan
+        return torch.empty_like(mu).fill_(torch.nan)
 
 
 class View(nn.Module):
