@@ -51,7 +51,6 @@ class FoVAE(pl.LightningModule):
         free_bits_kl=0,
         # n_spectral_iter=1,
         grad_skip_threshold=-1,
-        do_z_pred_cond_from_top=True,
         do_use_beta_norm=True,
         do_random_foveation=False,
         do_image_reconstruction=True,
@@ -120,8 +119,6 @@ class FoVAE(pl.LightningModule):
         self._beta = beta
 
         self.grad_skip_threshold = grad_skip_threshold
-        # self.do_add_pos_encoding = do_add_pos_encoding
-        self.do_z_pred_cond_from_top = do_z_pred_cond_from_top
 
         # TODO
         if do_use_beta_norm:

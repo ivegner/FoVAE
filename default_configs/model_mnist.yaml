@@ -1,0 +1,34 @@
+image_dim: 28
+fovea_radius: 2
+patch_dim: 8
+patch_channels: 1
+num_steps: 4
+ladder_dims:
+- 25
+z_dims:
+- 10
+ladder_hidden_dims:
+- - 256
+  - 256
+lvae_inf_hidden_dims:
+- - 256
+  - 256
+lvae_gen_hidden_dims:
+- - 256
+  - 256
+npp_embed_dim: 256
+npp_hidden_dim: 512
+npp_num_heads: 1
+npp_num_layers: 3
+foveation_padding: max
+foveation_padding_mode: replicate
+lr: 0.001
+beta: 0.2
+free_bits_kl: 0.5
+grad_skip_threshold: -1
+do_use_beta_norm: false
+do_random_foveation: false
+do_image_reconstruction: true
+do_next_patch_prediction: true
+reconstruct_fovea_only: false
+image_reconstruction_frac: 0.1

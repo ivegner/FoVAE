@@ -1,0 +1,122 @@
+# Same as Black.
+line-length = 100
+
+select = [
+    "F",      # pyflakes
+    "E",      # pycodestyle
+    "W",    # pycodestyle
+    "C90",  # mccabe
+    "I",    # isort
+    "N",    # pep8-naming
+    "D",    # pydocstyle
+    # # "UP",   # pyupgrade
+    # "YTT",  # flake8-2020
+    # "ANN",  # flake8-annotations
+    # "S",    # flake8-bandit
+    # "BLE",  # flake8-blind-except
+    # "FBT",  # flake8-boolean-trap
+    # "B",    # flake8-bugbear
+    # "A",    # flake8-builtins
+    # "COM",  # flake8-commas
+    # "C4",   # flake8-comprehensions
+    # "DTZ",  # flake8-datetimez
+    # "T10",  # flake8-debugger
+    # "EM",   # flake8-errmsg
+    # "EXE",  # flake8-executable
+    # "ISC",  # flake8-implicit-str-concat
+    # "ICN",  # flake8-import-conventions
+    # "G",    # flake8-logging-format
+    # "INP",  # flake8-no-pep420
+    # "PIE",  # flake8-pie
+    # "T20",  # flake8-print
+    # "PT",   # flake8-pytest-style
+    # "Q",    # flake8-quotes
+    # "RET",  # flake8-return
+    # "SIM",  # flake8-simplify
+    # "TID",  # flake8-tidy-imports
+    # "TCH",  # flake8-type-checking
+    # "ARG",  # flake8-unused-arguments
+    # "PTH",  # flake8-use-pathlib
+    # "ERA",  # eradicate
+    # "PD",   # pandas-vet
+    # "PGH",  # pygrep-hooks
+    # "PL",   # pylint
+    # # "TRY",  # tryceratops
+    # "RSE",  # flake8-raise
+    # "RUF",  # ruff-specific rules
+]
+
+fixable = [
+    "F",      # pyflakes
+    "E",      # pycodestyle
+    # "W",    # pycodestyle
+    # "I",    # isort
+    # "D",    # pydocstyle
+    # "UP",   # pyupgrade
+    # "ANN",  # flake8-annotations
+    # "B",    # flake8-bugbear
+    # "COM",  # flake8-commas
+    # "C4",   # flake8-comprehensions
+    # "EXE",  # flake8-executable
+    # "G",    # flake8-logging-format
+    # "PIE",  # flake8-pie
+    # "T20",  # flake8-print
+    # "PT",   # flake8-pytest-style
+    # "Q",    # flake8-quotes
+    # "RET",  # flake8-return
+    # "SIM",  # flake8-simplify
+    # "ERA",  # eradicate
+    # "PD",   # pandas-vet
+    # "PL",   # pylint
+    # "TRY",  # tryceratops
+    # "RUF",  # ruff-specific rules
+]
+
+ignore = [
+    "TRY003", # Avoid specifying long messages outside the exception class
+    "UP005", # Import from `collections.abc` instead: `Iterable`
+]
+
+unfixable = []
+
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+    "lightning_logs",
+    "data",
+    "vscode",
+]
+
+per-file-ignores = {}
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+# Assume Python 3.9.
+target-version = "py39"
+
+# [mccabe]
+# # Unlike Flake8, default to a complexity level of 10.
+# max-complexity = 10
+
+[pydocstyle]
+convention = "google"  # Accepts: "google", "numpy", or "pep257".
