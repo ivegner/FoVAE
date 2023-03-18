@@ -1,8 +1,9 @@
 from typing import Optional
 import torch
 
+
 # @torch.jit.script
-def gaussian_likelihood(x: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor, reduce="mean"):
+def gaussian_likelihood(x: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor, batch_reduce_fn="mean"):
     try:
         # scale = torch.exp(torch.ones_like(x_hat) * logscale)
         # mean = x_hat
@@ -11,9 +12,9 @@ def gaussian_likelihood(x: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor,
         if logvar.ndim == 1:
             logvar = logvar.unsqueeze(0).expand_as(x)
 
-        assert x.shape == mu.shape == logvar.shape, (
-            f"Shapes of x, mu and logvar must match. Got {x.shape}, {mu.shape}, {logvar.shape}"
-        )
+        assert (
+            x.shape == mu.shape == logvar.shape
+        ), f"Shapes of x, mu and logvar must match. Got {x.shape}, {mu.shape}, {logvar.shape}"
         std = torch.exp(0.5 * logvar)
         dist = torch.distributions.Normal(mu, std)
 
@@ -21,22 +22,23 @@ def gaussian_likelihood(x: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor,
         log_pxz = dist.log_prob(x)
 
         # s = log_pxz.sum(dim=1)
-        s = log_pxz.mean(dim=1) # CHANGED!
+        s = log_pxz.mean(dim=1)  # CHANGED!
         # s = -torch.nn.functional.mse_loss(x, mu)
 
     except ValueError as e:
         print(e)
         return torch.nan
 
-    if reduce == "mean":
+    if batch_reduce_fn == "mean":
         s = s.mean()
-    elif reduce == "sum":
+    elif batch_reduce_fn == "sum":
         s = s.sum()
-    elif reduce == "none":
+    elif batch_reduce_fn == "none":
         pass
     else:
-        raise ValueError(f"Unknown reduce value: {reduce}")
+        raise ValueError(f"Unknown batch_reduce_fn value: {batch_reduce_fn}")
     return s
+
 
 # @torch.jit.script
 def gaussian_kl_divergence(
@@ -45,7 +47,8 @@ def gaussian_kl_divergence(
     logvar: Optional[torch.Tensor] = None,
     mu_prior=0.0,
     std_prior=1.0,
-    reduce="mean",
+    batch_reduce_fn="mean",
+    # free_bits: Optional[float] = None,
 ):
     if std is None and logvar is None:
         raise ValueError("Either std or logvar must be provided")
@@ -77,12 +80,51 @@ def gaussian_kl_divergence(
         print(e)
         return torch.nan
 
-    if reduce == "mean":
+    if batch_reduce_fn == "mean":
         kl = kl.mean()
-    elif reduce == "sum":
+    elif batch_reduce_fn == "sum":
         kl = kl.sum()
-    elif reduce == "none":
+    elif batch_reduce_fn == "none":
         pass
     else:
-        raise ValueError(f"Unknown reduce value: {reduce}")
+        raise ValueError(f"Unknown batch_reduce_fn value: {batch_reduce_fn}")
+
+
     return kl
+
+
+def free_bits_kl(
+    kl: torch.Tensor,
+    free_bits: float,
+    # batch_average: Optional[bool] = False,
+    # eps: Optional[float] = 1e-6,
+) -> torch.Tensor:
+    """Computes free-bits version of KL divergence.
+
+    Takes in the KL with shape (batch size,), returns the scalar KL with
+    free bits (for optimization) which is the average free-bits KL
+    for the current batch
+    If batch_average is False (default), the free bits are
+    per batch element. Otherwise, the free bits are
+    assigned on average to the whole batch. In both cases, the batch
+    average is returned, so it's simply a matter of doing mean(clamp(KL))
+    or clamp(mean(KL)).
+
+    Adapted from https://github.com/addtt/boiler-pytorch.
+
+    Args:
+        kl (torch.Tensor): The KL with shape (batch size,)
+        free_bits (float): Free bits
+        batch_average (bool, optional)):
+            If True, free bits are computed for average batch KL. If False, computed for KL
+            of each element and then averaged across batch.
+
+    Returns:
+        The KL with free bits
+    """
+    # assert kl.dim() == 1
+    # if free_bits < eps:
+    #     return kl.mean(0)
+    # if batch_average:
+    #     return kl.mean(0).clamp(min=free_bits)
+    return kl.clamp(min=free_bits) # .mean(0)

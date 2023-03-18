@@ -15,7 +15,7 @@ from timeit import default_timer as timer
 
 import utils.foveation as fov_utils
 from modules.transformers import VisionTransformer
-from utils.vae_utils import gaussian_kl_divergence, gaussian_likelihood
+from utils.vae_utils import gaussian_kl_divergence, gaussian_likelihood, free_bits_kl
 from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters
 
 
@@ -318,8 +318,8 @@ class NextPatchPredictor(nn.Module):
         self.top_z_predictor = VisionTransformer(
             input_dim=z_dims[-1] + 2,  # 2 for concatenated next position
             output_dim=z_dims[-1] * 2,
-            embed_dim=64,  # TODO
-            hidden_dim=128,  # TODO
+            embed_dim=256,  # TODO
+            hidden_dim=512,  # TODO
             num_heads=1,  # TODO
             num_layers=3,  # TODO
             dropout=0,
@@ -328,8 +328,8 @@ class NextPatchPredictor(nn.Module):
         self.next_location_predictor = VisionTransformer(
             input_dim=z_dims[-1],
             output_dim=2 * 2,
-            embed_dim=64,  # TODO
-            hidden_dim=128,  # TODO
+            embed_dim=256,  # TODO
+            hidden_dim=512,  # TODO
             num_heads=1,  # TODO
             num_layers=3,  # TODO
             dropout=0,
@@ -491,6 +491,7 @@ class FoVAE(pl.LightningModule):
         foveation_padding_mode: Literal["zeros", "replicate"] = "replicate",
         lr=1e-3,
         beta=1,
+        free_bits_kl=0,
         # n_spectral_iter=1,
         # grad_clip=100,
         grad_skip_threshold=-1,
@@ -501,6 +502,7 @@ class FoVAE(pl.LightningModule):
         do_image_reconstruction=True,
         do_next_patch_prediction=True,
         reconstruct_fovea_only=False,
+        image_reconstruction_frac=1.0,
     ):
         super().__init__()
 
@@ -582,9 +584,11 @@ class FoVAE(pl.LightningModule):
             next_patch_pos_kl=1,
             next_patch_recon=1,
             next_patch_kl=beta_vae,
-            image_recon=20,
+            image_recon=5,
             spectral_norm=0,
         )
+
+        self.free_bits_kl = free_bits_kl
 
         # image: (b, c, image_dim[0], image_dim[1])
         # TODO: sparsify
@@ -600,6 +604,7 @@ class FoVAE(pl.LightningModule):
         self.do_image_reconstruction = do_image_reconstruction
         self.do_next_patch_prediction = do_next_patch_prediction
         self.reconstruct_fovea_only = reconstruct_fovea_only
+        self.image_reconstruction_fraction = image_reconstruction_frac
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -740,7 +745,10 @@ class FoVAE(pl.LightningModule):
                     if i == 0:
                         # input-level, compare against real patch
                         level_rec_loss = -1 * self._patch_likelihood(
-                            curr_patch, mu=mu, logvar=self.patch_noise_logvar, fovea_only=self.reconstruct_fovea_only
+                            curr_patch,
+                            mu=mu,
+                            logvar=self.patch_noise_logvar,
+                            fovea_only=self.reconstruct_fovea_only,
                         )
                         # level_rec_loss = -1 * self._patch_likelihood(
                         #     curr_patch, mu=mu, logvar=torch.ones_like(mu), fovea_only=self.reconstruct_fovea_only
@@ -797,7 +805,11 @@ class FoVAE(pl.LightningModule):
 
         if self.do_image_reconstruction:
             image_reconstruction_loss, _ = self._reconstruct_image(
-                real_patch_zs, x_full, return_patches=False, fovea_only=self.reconstruct_fovea_only
+                real_patch_zs,
+                x_full,
+                return_patches=False,
+                fovea_only=self.reconstruct_fovea_only,
+                proportion=self.image_reconstruction_fraction,
             )
         else:
             image_reconstruction_loss = torch.tensor(0.0, device=self.device)
@@ -811,7 +823,7 @@ class FoVAE(pl.LightningModule):
         # aggregate losses across steps
         # mean over steps
         curr_patch_kl_divs_by_layer = torch.stack(curr_patch_kl_divs_by_layer, dim=0).mean(dim=0)
-        if self.do_next_patch_prediction:
+        if self.do_next_patch_prediction and self.n_steps > 1:
             next_patch_rec_losses_by_layer = torch.stack(
                 next_patch_rec_losses_by_layer, dim=0
             ).mean(dim=0)
@@ -824,18 +836,20 @@ class FoVAE(pl.LightningModule):
         )
         # sum over layers (already mean over steps)
         curr_patch_kl_div_total_loss = (
-            self.betas["curr_patch_kl"] * curr_patch_kl_divs_by_layer.sum()
+            self.betas["curr_patch_kl"]
+            * free_bits_kl(curr_patch_kl_divs_by_layer, self.free_bits_kl).sum()
         )
-        next_patch_pos_kl_div_total_loss = (
-            self.betas["next_patch_pos_kl"] * next_patch_pos_kl_div_total_loss / self.n_steps
+        next_patch_pos_kl_div_total_loss = self.betas["next_patch_pos_kl"] * free_bits_kl(
+            next_patch_pos_kl_div_total_loss / self.n_steps, self.free_bits_kl
         )
         # sum over layers (already mean over steps)
-        if self.do_next_patch_prediction:
+        if self.do_next_patch_prediction and self.n_steps > 1:
             next_patch_rec_total_loss = (
                 self.betas["next_patch_recon"] * next_patch_rec_losses_by_layer.sum()
             )
             next_patch_kl_div_total_loss = (
-                self.betas["next_patch_kl"] * next_patch_kl_divs_by_layer.sum()
+                self.betas["next_patch_kl"]
+                * free_bits_kl(next_patch_kl_divs_by_layer, self.free_bits_kl).sum()
             )
 
         image_reconstruction_loss = self.betas["image_recon"] * image_reconstruction_loss
@@ -885,6 +899,8 @@ class FoVAE(pl.LightningModule):
         )
 
     def _patch_likelihood(self, patch, mu, logvar, fovea_only=False):
+        if logvar.size() == torch.Size([1]):
+            logvar = logvar.expand(mu.size())
         if fovea_only:
             return gaussian_likelihood(
                 self._patch_to_fovea(patch),
@@ -898,20 +914,34 @@ class FoVAE(pl.LightningModule):
         return self.next_patch_predictor._get_random_foveation_pos(batch_size, device=self.device)
 
     def _reconstruct_image(
-        self, sample_zs, image: Optional[torch.Tensor], return_patches=False, fovea_only=False
+        self,
+        sample_zs,
+        image: Optional[torch.Tensor],
+        return_patches=False,
+        fovea_only=False,
+        proportion=1.0,
     ):
         # positions span [-1, 1] in both x and y
 
         b = sample_zs[0][0].size(0)
 
         positions_x = torch.linspace(
-            -1, 1, steps=int(np.ceil(self.image_dim / (self.fovea_radius * 2))), device=self.device
+            -1, 1, steps=int(np.ceil(self.image_dim / (self.fovea_radius * 2))), device="cpu"
         )
         positions_y = torch.linspace(
-            -1, 1, steps=int(np.ceil(self.image_dim / (self.fovea_radius * 2))), device=self.device
+            -1, 1, steps=int(np.ceil(self.image_dim / (self.fovea_radius * 2))), device="cpu"
         )
-        positions = torch.stack(torch.meshgrid(positions_x, positions_y, indexing="xy"), dim=-1)
-        positions = positions.view(-1, 2).unsqueeze(1).expand(-1, b, -1)
+        positions = torch.stack(torch.meshgrid(positions_x, positions_y, indexing="xy"), dim=-1).view(-1, 2)
+
+        if proportion < 1.0:
+            # sample positions
+            n_positions = positions.size(0)
+            n_to_sample = int(np.ceil(n_positions * proportion))
+            sampled_indices = [torch.randperm(n_positions)[:n_to_sample] for _ in range(b)]
+            sampled_indices = torch.stack(sampled_indices, dim=1).view(-1)
+            sampled_positions = positions[sampled_indices].view(-1, b, 2).contiguous()
+        else:
+            sampled_positions = positions.unsqueeze(1).expand(-1, b, -1).contiguous()
 
         def memoized_patch_getter(image):
             _fov_memo = None
@@ -931,10 +961,11 @@ class FoVAE(pl.LightningModule):
             _memo_foveate_to_loc = memoized_patch_getter(image)
         # TODO: maybe reconstruct only some patches?
 
-        for i, position in enumerate(positions):
+        for i, position in enumerate(sampled_positions):
+            position = position.to(self.device)
             gen_dict = self._gen_next_patch(gen_zs, forced_next_location=position)
             gen_patch = gen_dict["generation"]["sample_zs"][0]
-            gen_mu, gen_logvar = gen_dict["generation"]["mu_logvars_gen"][0]
+            # gen_mu, gen_logvar = gen_dict["generation"]["mu_logvars_gen"][0]
             # gen_zs.append(gen_dict["generation"]["sample_zs"])
             gen_patch = gen_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)
             if image is not None:
@@ -944,7 +975,10 @@ class FoVAE(pl.LightningModule):
                 assert torch.is_same_size(gen_patch, real_patch)
 
                 patch_recon_loss = -1 * self._patch_likelihood(
-                    real_patch.view(b, -1), mu=gen_mu, logvar=self.patch_noise_logvar, fovea_only=fovea_only
+                    real_patch.view(b, -1),
+                    mu=gen_patch.view(b, -1),
+                    logvar=self.patch_noise_logvar,
+                    fovea_only=fovea_only,
                 )
                 # patch_recon_loss = -1 * self._patch_likelihood(
                 #     real_patch.view(b, -1), mu=gen_mu, logvar=torch.ones_like(gen_mu), fovea_only=fovea_only
@@ -954,7 +988,7 @@ class FoVAE(pl.LightningModule):
             patches.append(self._patch_to_fovea(gen_patch) if fovea_only else gen_patch)
 
         if image_recon_loss is not None:
-            image_recon_loss /= positions.size(0)
+            image_recon_loss /= sampled_positions.size(0)
 
         if return_patches:
             return image_recon_loss, torch.stack(patches, dim=0).transpose(0, 1)

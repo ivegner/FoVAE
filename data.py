@@ -12,10 +12,12 @@ class ImageDataModule(LightningDataModule):
         dataset: Literal["mnist", "cifar10", "imagenet"] = "cifar10",
         batch_size: int = 16,
         n_workers: int = 4,
+        persistent_workers: bool = True,
     ) -> None:
         super().__init__()
         self.batch_size = batch_size
         self.n_workers = n_workers
+        self.persistent_workers = persistent_workers
         if dataset == "mnist":
             self.dataset_full = torchvision.datasets.MNIST(
                 root="data",
@@ -76,7 +78,7 @@ class ImageDataModule(LightningDataModule):
             shuffle=True,
             num_workers=self.n_workers,
             pin_memory=True,
-            persistent_workers=True,
+            persistent_workers=self.persistent_workers,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -86,7 +88,7 @@ class ImageDataModule(LightningDataModule):
             shuffle=False,
             num_workers=self.n_workers,
             pin_memory=True,
-            persistent_workers=True,
+            persistent_workers=self.persistent_workers,
         )
 
     # def test_dataloader(self) -> DataLoader:
