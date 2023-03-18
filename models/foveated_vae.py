@@ -15,11 +15,17 @@ from timeit import default_timer as timer
 
 import utils.foveation as fov_utils
 from modules.lvae import Ladder, LadderVAE, NextPatchPredictor
-from utils.vae_utils import gaussian_kl_divergence, gaussian_likelihood, free_bits_kl, reparam_sample
+from utils.vae_utils import (
+    gaussian_kl_divergence,
+    gaussian_likelihood,
+    free_bits_kl,
+    reparam_sample,
+)
 from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters
 from utils.misc import recursive_to, recursive_detach
 
 # from memory_profiler import profile
+
 
 class FoVAE(pl.LightningModule):
     def __init__(
@@ -28,18 +34,23 @@ class FoVAE(pl.LightningModule):
         fovea_radius=2,
         patch_dim=6,
         patch_channels=3,
-        n_vae_levels=1,
-        z_dim=10,
-        n_steps: int = 1,
+        num_steps: int = 1,
+        ladder_dims: List[int] = [25],
+        z_dims: List[int] = [10],
+        ladder_hidden_dims: List[List[int]] = [[256, 256]],
+        lvae_inf_hidden_dims: List[List[int]] = [[256, 256]],
+        lvae_gen_hidden_dims: List[List[int]] = [[256, 256]],
+        npp_embed_dim: int = 256,
+        npp_hidden_dim: int = 512,
+        npp_num_heads: int = 1,
+        npp_num_layers: int = 3,
         foveation_padding: Union[Literal["max"], int] = "max",
         foveation_padding_mode: Literal["zeros", "replicate"] = "replicate",
         lr=1e-3,
         beta=1,
         free_bits_kl=0,
         # n_spectral_iter=1,
-        # grad_clip=100,
         grad_skip_threshold=-1,
-        # do_add_pos_encoding=True,
         do_z_pred_cond_from_top=True,
         do_use_beta_norm=True,
         do_random_foveation=False,
@@ -53,12 +64,20 @@ class FoVAE(pl.LightningModule):
         self.image_dim = image_dim
         self.fovea_radius = fovea_radius
         self.patch_dim = patch_dim
-        self.z_dim = z_dim
 
-        self.n_vae_levels = n_vae_levels
+        assert (
+            len(ladder_dims)
+            == len(z_dims)
+            == len(ladder_hidden_dims)
+            == len(lvae_inf_hidden_dims)
+            == len(lvae_gen_hidden_dims)
+        ), "Layer specifications must all have the same length"
 
-        self.n_steps = n_steps
-        # if do_add_pos_encoding:
+        self.num_vae_levels = len(ladder_dims)
+
+        self.z_dims = z_dims
+
+        self.num_steps = num_steps
         self.num_channels = patch_channels + 2
         self.lr = lr
         self.foveation_padding = foveation_padding
@@ -71,26 +90,17 @@ class FoVAE(pl.LightningModule):
 
         input_dim = self.num_channels * self.patch_dim * self.patch_dim
 
-        if n_vae_levels == 1:
-            VAE_LADDER_DIMS = [25]
-            VAE_Z_DIMS = [z_dim]
-            LADDER_HIDDEN_DIMS = [[256, 256]]  # [[65]] #[[256, 256]]
-            LVAE_INF_HIDDEN_DIMS = [[256, 256]]  # [[65]] #[[256, 256]]
-            LVAE_GEN_HIDDEN_DIMS = [[256, 256]]  # [[65]] #[[256, 256]]
-        elif n_vae_levels == 2:
-            VAE_LADDER_DIMS = [25, 16]
-            VAE_Z_DIMS = [z_dim, z_dim]
-            LADDER_HIDDEN_DIMS = [[256, 256], [128, 128]]
-            LVAE_INF_HIDDEN_DIMS = [[256, 256], [128, 128]]
-            LVAE_GEN_HIDDEN_DIMS = [[256, 256], [128, 128]]
-
-        self.ladder = Ladder(input_dim, VAE_LADDER_DIMS, LADDER_HIDDEN_DIMS)
+        self.ladder = Ladder(input_dim, ladder_dims, ladder_hidden_dims)
         self.ladder_vae = LadderVAE(
-            input_dim, VAE_LADDER_DIMS, VAE_Z_DIMS, LVAE_INF_HIDDEN_DIMS, LVAE_GEN_HIDDEN_DIMS
+            input_dim, ladder_dims, z_dims, lvae_inf_hidden_dims, lvae_gen_hidden_dims
         )
         self.next_patch_predictor = NextPatchPredictor(
             ladder_vae=self.ladder_vae,
-            z_dims=VAE_Z_DIMS,
+            z_dims=z_dims,
+            embed_dim=npp_embed_dim,
+            hidden_dim=npp_hidden_dim,
+            num_heads=npp_num_heads,
+            num_layers=npp_num_layers,
             do_random_foveation=do_random_foveation,
         )
         # self.patch_noise_logvar = nn.Parameter(torch.ones(input_dim), requires_grad=True)
@@ -113,8 +123,9 @@ class FoVAE(pl.LightningModule):
         # self.do_add_pos_encoding = do_add_pos_encoding
         self.do_z_pred_cond_from_top = do_z_pred_cond_from_top
 
+        # TODO
         if do_use_beta_norm:
-            beta_vae = (beta * z_dim) / input_dim  # according to beta-vae paper
+            beta_vae = (beta * z_dims[0]) / input_dim  # according to beta-vae paper
             print(
                 f"Using normalized betas[1] value of {beta_vae:.6f} as beta, "
                 f"calculated from unnormalized beta_vae {beta:.6f}"
@@ -204,7 +215,7 @@ class FoVAE(pl.LightningModule):
         gen_patch_zs = []
         gen_patch_dicts = []
 
-        for step in range(self.n_steps):
+        for step in range(self.num_steps):
             curr_patch = patches[-1]
             curr_patch_dict = self._process_patch(curr_patch)
             # curr_patch_dict:
@@ -364,7 +375,7 @@ class FoVAE(pl.LightningModule):
         # https://github.com/pytorch/pytorch/issues/13246
         # https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/
 
-        DO_COMPUTE_NEXT_PATCH_LOSSES = self.do_next_patch_prediction and self.n_steps > 1
+        DO_COMPUTE_NEXT_PATCH_LOSSES = self.do_next_patch_prediction and self.num_steps > 1
         # aggregate losses across steps
         # mean over steps
         curr_patch_kl_divs_by_layer = torch.stack(curr_patch_kl_divs_by_layer, dim=0).mean(dim=0)
@@ -377,7 +388,7 @@ class FoVAE(pl.LightningModule):
             )
 
         curr_patch_rec_total_loss = (
-            self.betas["curr_patch_recon"] * curr_patch_rec_total_loss / self.n_steps
+            self.betas["curr_patch_recon"] * curr_patch_rec_total_loss / self.num_steps
         )
         # sum over layers (already mean over steps)
         curr_patch_kl_div_total_loss = (
@@ -385,7 +396,7 @@ class FoVAE(pl.LightningModule):
             * free_bits_kl(curr_patch_kl_divs_by_layer, self.free_bits_kl).sum()
         )
         next_patch_pos_kl_div_total_loss = self.betas["next_patch_pos_kl"] * free_bits_kl(
-            next_patch_pos_kl_div_total_loss / self.n_steps, self.free_bits_kl
+            next_patch_pos_kl_div_total_loss / self.num_steps, self.free_bits_kl
         )
         # sum over layers (already mean over steps)
         if DO_COMPUTE_NEXT_PATCH_LOSSES:
@@ -414,13 +425,10 @@ class FoVAE(pl.LightningModule):
             + spectral_norm
         )
 
-
         # detach auxiliary outputs
         curr_patch_kl_divs_by_layer = recursive_detach(curr_patch_kl_divs_by_layer)
         if DO_COMPUTE_NEXT_PATCH_LOSSES:
-            next_patch_rec_losses_by_layer = recursive_detach(
-                next_patch_rec_losses_by_layer
-            )
+            next_patch_rec_losses_by_layer = recursive_detach(next_patch_rec_losses_by_layer)
             next_patch_kl_divs_by_layer = recursive_detach(next_patch_kl_divs_by_layer)
         patches = recursive_detach(patches)
         patch_positions = recursive_detach(patch_positions)
@@ -814,7 +822,7 @@ class FoVAE(pl.LightningModule):
         interpolation = torch.arange(-range_limit, range_limit + 0.1, step)
         samples = []
         with torch.no_grad():
-            for row in range(self.z_dim):
+            for row in range(self.z_dims[0]):
                 row_samples = []
                 # copy to CPU to bypass https://github.com/pytorch/pytorch/issues/94390
                 interp_z = z.clone().to("cpu")
@@ -902,7 +910,7 @@ class FoVAE(pl.LightningModule):
                 == step_sample_zs[0][0][0].size()
                 == torch.Size([self.num_channels * self.patch_dim * self.patch_dim])
             )
-            assert step_sample_zs[0][1][0].size() == torch.Size([self.z_dim])
+            assert step_sample_zs[0][1][0].size() == torch.Size([self.z_dims[0]])
 
             if batch_idx == 0:
                 N_TO_PLOT = 4
@@ -915,7 +923,7 @@ class FoVAE(pl.LightningModule):
                     n_pos_channels = 2  # if self.do_add_pos_encoding else 0
                     return g[:, :-n_pos_channels, :, :]
 
-                real_images = x[:N_TO_PLOT].repeat(self.n_steps, 1, 1, 1, 1)
+                real_images = x[:N_TO_PLOT].repeat(self.num_steps, 1, 1, 1, 1)
                 # plot stepwise foveations on real images
                 h, w = real_images.shape[3:]
 
@@ -938,8 +946,8 @@ class FoVAE(pl.LightningModule):
                 # make figure with a column for each step and 3 rows:
                 # 1 for image with foveation, one for patch, one for patch reconstruction
 
-                figs = [plt.figure(figsize=(self.n_steps * 3, 12)) for _ in range(N_TO_PLOT)]
-                axs = [f.subplots(4, self.n_steps) for f in figs]
+                figs = [plt.figure(figsize=(self.num_steps * 3, 12)) for _ in range(N_TO_PLOT)]
+                axs = [f.subplots(4, self.num_steps) for f in figs]
 
                 # plot foveations on images
                 for step, img_step_batch in enumerate(real_images):
@@ -963,7 +971,7 @@ class FoVAE(pl.LightningModule):
                         ax.set_title(f"Foveation at step {step}", fontsize=8)
 
                 # plot patches
-                for step in range(self.n_steps):
+                for step in range(self.num_steps):
                     step_patch_batch = remove_pos_channels_from_batch(
                         patches[step][:N_TO_PLOT].view(
                             -1, self.num_channels, self.patch_dim, self.patch_dim
@@ -974,7 +982,7 @@ class FoVAE(pl.LightningModule):
                         axs[i][1][step].set_title(f"Patch at step {step}", fontsize=8)
 
                 # plot patch reconstructions
-                for step in range(self.n_steps):
+                for step in range(self.num_steps):
                     step_patch_batch = remove_pos_channels_from_batch(
                         step_sample_zs[step][0][:N_TO_PLOT].view(
                             -1, self.num_channels, self.patch_dim, self.patch_dim
@@ -988,7 +996,7 @@ class FoVAE(pl.LightningModule):
 
                 # plot next patch predictions
                 if self.do_next_patch_prediction:
-                    for step in range(self.n_steps):
+                    for step in range(self.num_steps):
                         pred_patches = step_next_z_preds[step][0][:N_TO_PLOT].view(
                             -1, self.num_channels, self.patch_dim, self.patch_dim
                         )
@@ -1100,7 +1108,7 @@ class FoVAE(pl.LightningModule):
                 tensorboard.add_image(
                     "Absolute Latent Traversal",
                     torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp), nrow=self.z_dim
+                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[0]
                     ),
                     global_step=self.global_step,
                 )
@@ -1112,7 +1120,7 @@ class FoVAE(pl.LightningModule):
                 tensorboard.add_image(
                     "Latent Traversal Around Z",
                     torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp), nrow=self.z_dim
+                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[0]
                     ),
                     global_step=self.global_step,
                 )
