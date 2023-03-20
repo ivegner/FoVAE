@@ -131,7 +131,7 @@ class FoVAE(pl.LightningModule):
             beta_vae = beta
 
         self.betas = dict(
-            curr_patch_recon=1,
+            curr_patch_recon=2,
             curr_patch_kl=beta_vae,
             next_patch_pos_kl=1,
             next_patch_recon=1,
