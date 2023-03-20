@@ -863,6 +863,7 @@ class FoVAE(pl.LightningModule):
             logger=True,
             prog_bar=True,
             reduce_fx=torch.sum,
+            sync_dist=True
         )
         # self.log(grad_norm, skip_update, on_epoch=True, logger=True)
 
@@ -1231,6 +1232,7 @@ class FoVAE(pl.LightningModule):
             logger=True,
             prog_bar=True,
             reduce_fx=torch.max,
+            sync_dist=True
         )
         return g
 
@@ -1255,6 +1257,7 @@ class FoVAE(pl.LightningModule):
             logger=True,
             prog_bar=True,
             reduce_fx=torch.max,
+            sync_dist=True
         )
 
         self.log(
@@ -1265,6 +1268,7 @@ class FoVAE(pl.LightningModule):
             logger=True,
             prog_bar=True,
             reduce_fx=torch.sum,
+            sync_dist=True
         )
 
         return super().on_after_backward()
