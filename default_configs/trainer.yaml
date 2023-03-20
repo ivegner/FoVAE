@@ -6,10 +6,11 @@ trainer:
   check_val_every_n_epoch: 1
   max_epochs: 3000
   log_every_n_steps: 10
-  accelerator: mps
+  accelerator: auto
   enable_model_summary: true
   num_sanity_val_steps: 2
   reload_dataloaders_every_n_epochs: 10
+  strategy: ddp
   # defaults:
   callbacks: null
   default_root_dir: null
@@ -34,7 +35,6 @@ trainer:
   limit_test_batches: null
   limit_predict_batches: null
   val_check_interval: null
-  strategy: null
   sync_batchnorm: false
   precision: 32
   resume_from_checkpoint: null

@@ -10,6 +10,7 @@ class ImageDataModule(LightningDataModule):
     def __init__(
         self,
         dataset: Literal["mnist", "cifar10", "imagenet"] = "cifar10",
+        data_dir: str = "data",
         batch_size: int = 16,
         num_workers: int = 4,
         persistent_workers: bool = True,
@@ -20,7 +21,7 @@ class ImageDataModule(LightningDataModule):
         self.persistent_workers = persistent_workers
         if dataset == "mnist":
             self.dataset_full = torchvision.datasets.MNIST(
-                root="data",
+                root=data_dir,
                 transform=transforms.Compose(
                     [transforms.ToTensor(), transforms.Normalize(0.5, 0.5)]
                 ),
@@ -28,21 +29,21 @@ class ImageDataModule(LightningDataModule):
             )
         elif dataset == "cifar10":
             self.dataset_full = torchvision.datasets.CIFAR10(
-                root="data",
+                root=data_dir,
                 transform=transforms.Compose(
                     [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
                 ),
             )
         elif dataset == "imagenet":
             self.dataset_train = torchvision.datasets.ImageNet(
-                root="data",
+                root=data_dir,
                 transform=transforms.Compose(
                     [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
                 ),
                 split="train",
             )
             self.dataset_val = torchvision.datasets.ImageNet(
-                root="data",
+                root=data_dir,
                 transform=transforms.Compose(
                     [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
                 ),
