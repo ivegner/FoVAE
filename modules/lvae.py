@@ -214,6 +214,8 @@ class LadderVAE(nn.Module):
                     # also TODO: explore parametric combination methods
                     # (e.g. concat + linear transform)
 
+                    # TODO! REWRITE TO USE STDS AND NORMS
+
                     _var_inf = torch.exp(logvar_inf)
                     _var_gen = torch.exp(logvar_gen_prior)
 

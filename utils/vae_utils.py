@@ -1,21 +1,35 @@
-from typing import Optional
+from typing import Callable, Literal, Optional, Union
 import torch
 
 
 # @torch.jit.script
-def gaussian_likelihood(x: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor, batch_reduce_fn="mean"):
+def gaussian_likelihood(
+    x: torch.Tensor,
+    mu: torch.Tensor,
+    raw_logstd: torch.Tensor,
+    batch_reduce_fn="mean",
+    logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
+    logstd_norm_bound_min: Optional[float] = None,
+    logstd_norm_bound_max: Optional[float] = None,
+):
     try:
         # scale = torch.exp(torch.ones_like(x_hat) * logscale)
         # mean = x_hat
         if mu.ndim == 1:
             mu = mu.unsqueeze(0).expand_as(x)
-        if logvar.ndim == 1:
-            logvar = logvar.unsqueeze(0).expand_as(x)
+        if raw_logstd.ndim == 1:
+            raw_logstd = raw_logstd.unsqueeze(0).expand_as(x)
 
         assert (
-            x.shape == mu.shape == logvar.shape
-        ), f"Shapes of x, mu and logvar must match. Got {x.shape}, {mu.shape}, {logvar.shape}"
-        std = torch.exp(0.5 * logvar)
+            x.shape == mu.shape == raw_logstd.shape
+        ), f"Shapes of x, mu and raw_logstd must match. Got {x.shape}, {mu.shape}, {raw_logstd.shape}"
+        logstd, std = _norm_raw_logstd(
+            raw_logstd,
+            logstd_norm_method,
+            norm_std_bound_min=logstd_norm_bound_min,
+            norm_std_bound_max=logstd_norm_bound_max,
+        )
+
         dist = torch.distributions.Normal(mu, std)
 
         # measure prob of seeing image under p(x|z)
@@ -43,37 +57,72 @@ def gaussian_likelihood(x: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor,
 # @torch.jit.script
 def gaussian_kl_divergence(
     mu: torch.Tensor,
-    std: Optional[torch.Tensor] = None,
-    logvar: Optional[torch.Tensor] = None,
-    mu_prior=0.0,
-    std_prior=1.0,
+    raw_logstd: torch.Tensor,
+    mu_prior: Optional[Union[float, torch.Tensor]] = None,
+    raw_logstd_prior: Optional[float] = None,
     batch_reduce_fn="mean",
-    # free_bits: Optional[float] = None,
+    logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
+    logstd_norm_bound_min: Optional[float] = None,
+    logstd_norm_bound_max: Optional[float] = None,
 ):
-    if std is None and logvar is None:
-        raise ValueError("Either std or logvar must be provided")
-    elif std is not None and logvar is not None:
-        raise ValueError("Only one of std or logvar must be provided")
+    # if std is None and logstd is None:
+    #     raise ValueError("Either std or logstd must be provided")
+    # elif std is not None and logstd is not None:
+    #     raise ValueError("Only one of std or logstd must be provided")
+    do_norm_prior = True
 
+    if mu_prior is None and raw_logstd_prior is None:
+        mu_prior = torch.zeros_like(mu)
+        raw_logstd_prior = torch.zeros_like(raw_logstd)
+        do_norm_prior = False
+    elif mu_prior is not None and raw_logstd_prior is not None:
+        if (
+            isinstance(mu_prior, (float, int))
+            or isinstance(mu_prior, torch.Tensor)
+            and mu_prior.ndim == 0
+        ):
+            mu_prior = torch.ones_like(mu) * mu_prior
+        if (
+            isinstance(raw_logstd_prior, (float, int))
+            or isinstance(raw_logstd_prior, torch.Tensor)
+            and raw_logstd_prior.ndim == 0
+        ):
+            raw_logstd_prior = torch.ones_like(raw_logstd) * raw_logstd_prior
+    else:
+        raise ValueError(
+            "If either mu_prior or raw_logstd_prior is provided, both must be provided"
+        )
     try:
-        if std is None:
-            std = torch.exp(0.5 * logvar)
+        q_logstd, q_std = _norm_raw_logstd(
+            raw_logstd,
+            logstd_norm_method,
+            norm_std_bound_min=logstd_norm_bound_min,
+            norm_std_bound_max=logstd_norm_bound_max,
+        )
+        p_logstd, p_std = _norm_raw_logstd(
+            raw_logstd_prior,
+            logstd_norm_method=logstd_norm_method if do_norm_prior else "none",
+            norm_std_bound_min=logstd_norm_bound_min,
+            norm_std_bound_max=logstd_norm_bound_max,
+        )
 
         # --------------------------
         # Monte carlo KL divergence
         # --------------------------
         # 1. define the first two probabilities (in this case Normal for both)
-        p = torch.distributions.Normal(
-            torch.ones_like(mu) * mu_prior, torch.ones_like(std) * std_prior
-        )
-        q = torch.distributions.Normal(mu, std)
+        # p = torch.distributions.Normal(
+        #     torch.ones_like(mu) * mu_prior, torch.ones_like(std) * std_prior
+        # )
+        # q = torch.distributions.Normal(mu, std)
 
         # # 2. get the probabilities from the equation
         # # log(q(z|x)) - log(p(z))
         # log_qzx = q.log_prob(z)
         # log_pz = p.log_prob(z)
         # kl = (log_qzx - log_pz)
-        kl = torch.distributions.kl_divergence(q, p)
+        # kl = torch.distributions.kl_divergence(q, p)
+
+        kl = _base_gaussian_kl(mu_prior, p_std, p_logstd, mu, q_std, q_logstd)
         kl = kl.sum(-1)
 
     except ValueError as e:
@@ -88,7 +137,6 @@ def gaussian_kl_divergence(
         pass
     else:
         raise ValueError(f"Unknown batch_reduce_fn value: {batch_reduce_fn}")
-
 
     return kl
 
@@ -127,23 +175,50 @@ def free_bits_kl(
     #     return kl.mean(0)
     # if batch_average:
     #     return kl.mean(0).clamp(min=free_bits)
-    return kl.clamp(min=free_bits) # .mean(0)
+    return kl.clamp(min=free_bits)  # .mean(0)
 
 
 @torch.jit.script
-def _reparam_sample(mu, logvar):
-    std = torch.exp(0.5 * logvar)
+def _reparam_sample(mu, std):
+    # std = torch.exp(0.5 * logstd)
     eps = torch.empty_like(mu).normal_(0.0, 1.0)
     return mu + std * eps
 
 
-def reparam_sample(mu, logvar):
+def reparam_sample(
+    mu,
+    raw_logstd,
+    logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
+    logstd_norm_bound_min: Optional[float] = None,
+    logstd_norm_bound_max: Optional[float] = None,
+):
+    """Reparameterization trick for sampling from a Gaussian distribution.
+
+    Args:
+        mu (torch.Tensor): Mean of the Gaussian distribution
+        raw_logstd (torch.Tensor): Raw output of the network, corresponding to log std of the
+            Gaussian distribution
+        logstd_norm_method (str, optional): Normalization method for raw_logstd. Defaults to "none".
+            See Dehaene and Brossard 2021, “Re-Parameterizing VAEs for Stability.”
+        logstd_norm_bound_min (float, optional): Minimum bound for raw_logstd. Defaults to None.
+        logstd_norm_bound_max (float, optional): Maximum bound for raw_logstd. Defaults to None.
+
+    Returns:
+        torch.Tensor: Sample from the Gaussian distribution
+    """
+    _, std = _norm_raw_logstd(
+        raw_logstd,
+        logstd_norm_method,
+        norm_std_bound_min=logstd_norm_bound_min,
+        norm_std_bound_max=logstd_norm_bound_max,
+    )
+
     i = 0
     while i < 20:
         # randn_like sometimes produces NaNs for unknown reasons
         # maybe see: https://github.com/pytorch/pytorch/issues/46155
         # so we try again if that happens
-        s = _reparam_sample(mu, logvar)
+        s = _reparam_sample(mu, std)
         if not torch.isnan(s).any():
             return s
         # print(f"Could not sample without NaNs (try {i})")
@@ -151,6 +226,140 @@ def reparam_sample(mu, logvar):
     else:
         print("Could not sample from N(0, 1) without NaNs after 20 tries")
         print("mu:", mu.max(), mu.min())
-        print("logvar:", logvar.max(), logvar.min())
+        print("raw_logstd:", raw_logstd.max(), raw_logstd.min())
+        print("std:", std.max(), std.min())
         return torch.empty_like(mu).fill_(torch.nan)
 
+
+def _norm_raw_logstd(
+    logstd,
+    logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
+    norm_std_bound_min: Optional[float] = None,
+    norm_std_bound_max: Optional[float] = None,
+):
+    if logstd_norm_method == "none":
+        return decode_raw_logstd_naive(logstd)
+    elif logstd_norm_method == "explin":
+        return decode_raw_logstd_explin(logstd)
+    elif logstd_norm_method == "bounded":
+        if norm_std_bound_min is None and norm_std_bound_max is None:
+            raise ValueError(
+                "At least one of logstd_norm_bound_min or logstd_norm_bound_max must be "
+                "provided if logstd_norm_method is 'bounded'"
+            )
+        elif norm_std_bound_min is not None and norm_std_bound_max is not None:
+            return decode_raw_logstd_bounded(logstd, norm_std_bound_min, norm_std_bound_max)
+        elif norm_std_bound_min is not None:
+            return decode_raw_logstd_downbounded(logstd, min_std_value=norm_std_bound_min)
+        elif norm_std_bound_max is not None:
+            return decode_raw_logstd_upbounded(logstd, max_std_value=norm_std_bound_max)
+
+
+# def gaussian_kl_divergence_naive(
+#     p_mu: torch.Tensor, p_std: torch.Tensor, q_mu: torch.Tensor, q_std: torch.Tensor
+# ):
+#     """Pytorch naive implementation of the KL divergence between two Gaussians."""
+#     return _base_gaussian_kl(p_mu, p_std, torch.log(p_std), q_mu, q_std, torch.log(q_std))
+
+
+# def gaussian_kl_divergence_exp(
+#     p_mu: torch.Tensor, p_logstd: torch.Tensor, q_mu: torch.Tensor, q_logstd: torch.Tensor
+# ):
+#     """More numerically stable naive KL implementation of KL divergence between two Gaussians."""
+#     return _base_gaussian_kl(
+#         p_mu, torch.exp(p_logstd), p_logstd, q_mu, torch.exp(q_logstd), q_logstd
+#     )
+
+
+# def gaussian_kl_divergence_explin(
+#     p_mu: torch.Tensor, p_logstd_raw: torch.Tensor, q_mu: torch.Tensor, q_logstd_raw: torch.Tensor
+# ):
+#     """KL divergence in which exponentiation is replaced by linear function for high values of logstd."""
+#     p_logstd, p_std = decode_raw_logstd_explin(p_logstd_raw)
+#     q_logstd, q_std = decode_raw_logstd_explin(q_logstd_raw)
+
+#     return _base_gaussian_kl(p_mu, p_std, p_logstd, q_mu, q_std, q_logstd)
+
+
+@torch.jit.script
+def _base_gaussian_kl(
+    p_mu: torch.Tensor,
+    p_std: torch.Tensor,
+    p_logstd: torch.Tensor,
+    q_mu: torch.Tensor,
+    q_std: torch.Tensor,
+    q_logstd: torch.Tensor,
+):
+    """Base implementation for Gaussian KL that can be used for many implementations."""
+    return q_logstd - p_logstd + (p_std.pow(2) + (p_mu - q_mu).pow(2)) / (2 * q_std.pow(2)) - 0.5
+
+
+@torch.jit.script
+def decode_raw_logstd_naive(p: torch.Tensor):
+    """Decodes raw logstd from a network output into logstd and std."""
+    return p, torch.exp(p)
+
+
+@torch.jit.script
+def decode_raw_logstd_explin(p: torch.Tensor):
+    """Decodes raw logstd from a network output into logstd and std.
+
+    Uses a linear function for high values of logstd.
+    """
+    p_clipmin = torch.clip(p, min=0)
+    p_clipmax = torch.clip(p, max=0)
+
+    mask = p_clipmin > 0
+
+    logstd = torch.where(mask, torch.log1p(p_clipmin), p_clipmax)
+    std = torch.where(mask,  1 + p_clipmin, torch.exp(p_clipmax))
+    return logstd, std
+
+
+@torch.jit.script
+def decode_raw_logstd_upbounded(p: torch.Tensor, max_std_value: float = 1.0):
+    """Decodes raw logstd from a network output into logstd and std.
+
+    Caps the maximum std to max_value.
+    """
+    p_clipmin = torch.clip(p, min=0)
+    p_clipmax = torch.clip(p, max=0)
+
+    mask = p_clipmin > 0
+
+    _g = torch.tensor(max_std_value/2, dtype=p.dtype, device=p.device)
+    _log_g = torch.log(_g)
+    _exp_min = torch.exp(-p_clipmin)
+
+    logstd = torch.where(mask, torch.log(2 - _exp_min) + _log_g, p_clipmax + _log_g)
+    std = torch.where(mask, _g * (2 - _exp_min), _g * torch.exp(p_clipmax))
+    return logstd, std
+
+
+@torch.jit.script
+def decode_raw_logstd_downbounded(p: torch.Tensor, min_std_value: float = 0.0):
+    """Decodes raw logstd from a network output into logstd and std.
+
+    Caps the minimum std to min_value. Useful for decoding with minimum noise.
+    """
+    std = min_std_value + torch.exp(p)
+    logstd = torch.log(std)
+    return logstd, std
+
+
+@torch.jit.script
+def decode_raw_logstd_bounded(
+    p: torch.Tensor,
+    min_std_value: float = 0.0,
+    max_std_value: float = 1.0,
+    # scaling_function: Callable = torch.sigmoid,
+):
+    """Decodes raw logstd from a network output into logstd and std.
+
+    Caps the minimum std to min_value and maximum std to max_value,
+    using sigmoid to normalize.
+    Useful for decoding with minimum noise and a maximum cap.
+    """
+    std = min_std_value + (max_std_value - min_std_value) * torch.sigmoid(p)
+    logstd = torch.log(std)
+    return logstd, std
