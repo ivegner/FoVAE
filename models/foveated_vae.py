@@ -222,9 +222,9 @@ class FoVAE(pl.LightningModule):
             curr_patch = patches[-1]
             curr_patch_dict = self._process_patch(curr_patch)
             # curr_patch_dict:
-            #   mu_logstds_inference: list(n_vae_layers) of (mu, logstd) tuples, each (b, z_dim)
-            #   mu_logstds_gen_prior: list(n_vae_layers+1) of (mu, logstd) tuples, each (b, z_dim)
-            #   mu_logstds_gen: list(n_vae_layers+1) of (mu, logstd) tuples, each (b, z_dim)
+            #   mu_stds_inference: list(n_vae_layers) of (mu, std) tuples, each (b, z_dim)
+            #   mu_stds_gen_prior: list(n_vae_layers+1) of (mu, std) tuples, each (b, z_dim)
+            #   mu_stds_gen: list(n_vae_layers+1) of (mu, std) tuples, each (b, z_dim)
             #   sample_zs: list(n_vae_layers+1) of (b, z_dim)
             # each list is in order from bottom to top.
             # gen lists and sample_zs have input-level at index 0
@@ -238,14 +238,14 @@ class FoVAE(pl.LightningModule):
                 )
                 # next_patch_dict:
                 #   generation:
-                #     mu_logstds_gen_prior: list(n_vae_layers+1) of (mu, logstd) tuples,
+                #     mu_stds_gen_prior: list(n_vae_layers+1) of (mu, std) tuples,
                 #                                                   each (b, z_dim)
-                #     mu_logstds_gen: list(n_vae_layers+1) of (mu, logstd) tuples, each (b, z_dim)
+                #     mu_stds_gen: list(n_vae_layers+1) of (mu, std) tuples, each (b, z_dim)
                 #     sample_zs: list(n_vae_layers+1) of (b, z_dim)
                 #   position:
                 #     next_pos: (b, 2)
                 #     next_pos_mu: (b, 2)
-                #     next_pos_logstd: (b, 2)
+                #     next_pos_std: (b, 2)
                 gen_patch_zs.append(next_patch_dict["generation"]["sample_zs"])
                 gen_patch_dicts.append(next_patch_dict)
 
@@ -267,14 +267,14 @@ class FoVAE(pl.LightningModule):
             _curr_patch_rec_loss = -1 * self._patch_likelihood(
                 curr_patch,
                 mu=curr_patch_dict["sample_zs"][0],
-                raw_logstd=torch.log(self.patch_noise_std),
+                std=self.patch_noise_std,
                 is_bottom_level=True,
                 fovea_only=self.reconstruct_fovea_only,
             )
 
             _curr_patch_kl_divs = []
-            for i, (mu, logstd) in enumerate(curr_patch_dict["mu_logstds_gen"]):
-                kl = self._kl_divergence(mu=mu, raw_logstd=logstd, bound_with_noise=(i == 0))
+            for i, (mu, std) in enumerate(curr_patch_dict["mu_stds_gen"]):
+                kl = self._kl_divergence(mu=mu, std=std)#, bound_with_noise=(i == 0))
                 if i == 0 and not DO_KL_ON_INPUT_LEVEL:
                     kl = torch.zeros_like(kl)
                 _curr_patch_kl_divs.append(kl)
@@ -286,7 +286,7 @@ class FoVAE(pl.LightningModule):
             if not self.do_random_foveation:
                 _next_patch_pos_kl_div = self._kl_divergence(
                     mu=next_patch_dict["position"]["next_pos_mu"],
-                    raw_logstd=next_patch_dict["position"]["next_pos_logstd"],
+                    std=next_patch_dict["position"]["next_pos_std"],
                 )
 
             # if any previous predicted patch, calculate loss between
@@ -296,32 +296,32 @@ class FoVAE(pl.LightningModule):
                 # -2 because -1 is the current step, and -2 is the previous step
                 prev_gen_patch_dict = gen_patch_dicts[-2]
                 _next_patch_rec_losses, _next_patch_kl_divs = [], []
-                for i, (mu, logstd) in enumerate(
-                    prev_gen_patch_dict["generation"]["mu_logstds_gen"]
+                for i, (mu, std) in enumerate(
+                    prev_gen_patch_dict["generation"]["mu_stds_gen"]
                 ):
                     if i == 0:
                         # input-level, compare against real patch
                         level_rec_loss = -1 * self._patch_likelihood(
                             curr_patch,
                             mu=mu, # TODO: curr_patch_dict["sample_zs"][0]???
-                            raw_logstd=torch.log(self.patch_noise_std),
+                            raw_std=self.patch_noise_std,
                             is_bottom_level=True,
                             fovea_only=self.reconstruct_fovea_only,
                         )
                         level_kl = self._kl_divergence(
                             mu=mu,
-                            raw_logstd=logstd,
+                            std=std,
                             bound_with_noise=True
                         )
                     else:
                         level_rec_loss = -1 * self._patch_likelihood(
                             curr_patch_dict["sample_zs"][i],
                             mu=mu,
-                            raw_logstd=logstd,
+                            std=std,
                         )
                         level_kl = self._kl_divergence(
                             mu=mu,
-                            raw_logstd=logstd,
+                            std=std,
                         )
 
                     if i == 0 and not DO_KL_ON_INPUT_LEVEL:
@@ -472,37 +472,37 @@ class FoVAE(pl.LightningModule):
         )
 
     def _patch_likelihood(
-        self, patch, mu, raw_logstd, is_bottom_level=False, fovea_only=False
+        self, patch, mu, std, is_bottom_level=False, fovea_only=False
     ):
-        if raw_logstd.size() == torch.Size([1]):
-            raw_logstd = raw_logstd.expand(mu.size())
+        if std.size() == torch.Size([1]):
+            std = std.expand(mu.size())
 
         if is_bottom_level and fovea_only:
             patch = self._patch_to_fovea(patch)
             mu = self._patch_to_fovea(mu)
-            raw_logstd = self._patch_to_fovea(raw_logstd)
+            std = self._patch_to_fovea(std)
 
         return gaussian_likelihood(
             patch,
             mu=mu,
-            raw_logstd=raw_logstd,
+            std=std,
             batch_reduce_fn="mean",
-            norm_std_method="bounded" if is_bottom_level else "explin",
-            norm_std_bound_min=self.patch_noise_std if is_bottom_level else None,
-            norm_std_bound_max=1.0 if is_bottom_level else None,
+            # norm_std_method="bounded" if is_bottom_level else "explin",
+            # norm_std_bound_min=self.patch_noise_std if is_bottom_level else None,
+            # norm_std_bound_max=1.0 if is_bottom_level else None,
         )
 
-    def _kl_divergence(self, mu, raw_logstd, bound_with_noise=False):
-        if raw_logstd.size() == torch.Size([1]):
-            raw_logstd = raw_logstd.expand(mu.size())
+    def _kl_divergence(self, mu, std, bound_with_noise=False):
+        if std.size() == torch.Size([1]):
+            std = std.expand(mu.size())
 
         return gaussian_kl_divergence(
             mu=mu,
-            raw_logstd=raw_logstd,
+            std=std,
             batch_reduce_fn="mean",
-            norm_std_method="bounded" if bound_with_noise else "explin",
-            norm_std_bound_min=self.patch_noise_std if bound_with_noise else None,
-            norm_std_bound_max=1.0 if bound_with_noise else None,
+            # norm_std_method="bounded" if bound_with_noise else "explin",
+            # norm_std_bound_min=self.patch_noise_std if bound_with_noise else None,
+            # norm_std_bound_max=1.0 if bound_with_noise else None,
         )
 
     def _get_random_foveation_pos(self, batch_size: int):
@@ -562,7 +562,7 @@ class FoVAE(pl.LightningModule):
             position = position.to(self.device)
             gen_dict = self._gen_next_patch(gen_zs, forced_next_location=position)
             gen_patch = gen_dict["generation"]["sample_zs"][0]
-            # gen_mu, gen_logstd = gen_dict["generation"]["mu_logstds_gen"][0]
+            # gen_mu, gen_std = gen_dict["generation"]["mu_stds_gen"][0]
             # gen_zs.append(gen_dict["generation"]["sample_zs"])
             gen_patch = gen_patch.view(b, self.num_channels, self.patch_dim, self.patch_dim)
             if image is not None:
@@ -574,12 +574,12 @@ class FoVAE(pl.LightningModule):
                 patch_recon_loss = -1 * self._patch_likelihood(
                     real_patch.view(b, -1),
                     mu=gen_patch.view(b, -1),
-                    raw_logstd=self.patch_noise_std,
+                    std=self.patch_noise_std,
                     is_bottom_level=True,
                     fovea_only=fovea_only,
                 )
                 # patch_recon_loss = -1 * self._patch_likelihood(
-                #     real_patch.view(b, -1), mu=gen_mu, logstd=torch.ones_like(gen_mu), fovea_only=fovea_only
+                #     real_patch.view(b, -1), mu=gen_mu, std=torch.ones_like(gen_mu), fovea_only=fovea_only
                 # )
                 image_recon_loss += patch_recon_loss
 
@@ -803,7 +803,7 @@ class FoVAE(pl.LightningModule):
     #     self.eval()
 
     #     with torch.no_grad():
-    #         zs, mus, logstds = self._encode_patch(patch_with_pos)
+    #         zs, mus, stds = self._encode_patch(patch_with_pos)
 
     #     return zs
 
@@ -877,7 +877,7 @@ class FoVAE(pl.LightningModule):
         total_loss = forward_out["losses"]["total_loss"]
         # self.log("train_total_loss", total_loss, prog_bar=True)
         self.log_dict({"train_" + k: v.detach().item() for k, v in forward_out["losses"].items()})
-        patch_noise_std_mean = self.patch_noise_std.mean().detach().item()
+        patch_noise_std_mean = self.patch_noise_std.detach().mean().item()
         self.log("patch_noise_std_mean", patch_noise_std_mean, logger=True, on_step=True)
 
         # self._optimizer_step(loss)

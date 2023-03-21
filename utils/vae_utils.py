@@ -6,29 +6,29 @@ import torch
 def gaussian_likelihood(
     x: torch.Tensor,
     mu: torch.Tensor,
-    raw_logstd: torch.Tensor,
+    std: torch.Tensor,
     batch_reduce_fn="mean",
-    logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
-    logstd_norm_bound_min: Optional[float] = None,
-    logstd_norm_bound_max: Optional[float] = None,
+    # logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
+    # logstd_norm_bound_min: Optional[float] = None,
+    # logstd_norm_bound_max: Optional[float] = None,
 ):
     try:
         # scale = torch.exp(torch.ones_like(x_hat) * logscale)
         # mean = x_hat
         if mu.ndim == 1:
             mu = mu.unsqueeze(0).expand_as(x)
-        if raw_logstd.ndim == 1:
-            raw_logstd = raw_logstd.unsqueeze(0).expand_as(x)
+        if std.ndim == 1:
+            std = std.unsqueeze(0).expand_as(x)
 
         assert (
-            x.shape == mu.shape == raw_logstd.shape
-        ), f"Shapes of x, mu and raw_logstd must match. Got {x.shape}, {mu.shape}, {raw_logstd.shape}"
-        logstd, std = _norm_raw_logstd(
-            raw_logstd,
-            logstd_norm_method,
-            norm_std_bound_min=logstd_norm_bound_min,
-            norm_std_bound_max=logstd_norm_bound_max,
-        )
+            x.shape == mu.shape == std.shape
+        ), f"Shapes of x, mu and std must match. Got {x.shape}, {mu.shape}, {std.shape}"
+        # logstd, std = norm_raw_logstd(
+        #     raw_logstd,
+        #     logstd_norm_method,
+        #     norm_std_bound_min=logstd_norm_bound_min,
+        #     norm_std_bound_max=logstd_norm_bound_max,
+        # )
 
         dist = torch.distributions.Normal(mu, std)
 
@@ -57,25 +57,25 @@ def gaussian_likelihood(
 # @torch.jit.script
 def gaussian_kl_divergence(
     mu: torch.Tensor,
-    raw_logstd: torch.Tensor,
+    std: torch.Tensor,
     mu_prior: Optional[Union[float, torch.Tensor]] = None,
-    raw_logstd_prior: Optional[float] = None,
+    std_prior: Optional[float] = None,
     batch_reduce_fn="mean",
-    logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
-    logstd_norm_bound_min: Optional[float] = None,
-    logstd_norm_bound_max: Optional[float] = None,
+    # logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
+    # logstd_norm_bound_min: Optional[float] = None,
+    # logstd_norm_bound_max: Optional[float] = None,
 ):
     # if std is None and logstd is None:
     #     raise ValueError("Either std or logstd must be provided")
     # elif std is not None and logstd is not None:
     #     raise ValueError("Only one of std or logstd must be provided")
-    do_norm_prior = True
+    # do_norm_prior = True
 
-    if mu_prior is None and raw_logstd_prior is None:
+    if mu_prior is None and std_prior is None:
         mu_prior = torch.zeros_like(mu)
-        raw_logstd_prior = torch.zeros_like(raw_logstd)
-        do_norm_prior = False
-    elif mu_prior is not None and raw_logstd_prior is not None:
+        std_prior = torch.zeros_like(std)
+        # do_norm_prior = False
+    elif mu_prior is not None and std_prior is not None:
         if (
             isinstance(mu_prior, (float, int))
             or isinstance(mu_prior, torch.Tensor)
@@ -83,46 +83,46 @@ def gaussian_kl_divergence(
         ):
             mu_prior = torch.ones_like(mu) * mu_prior
         if (
-            isinstance(raw_logstd_prior, (float, int))
-            or isinstance(raw_logstd_prior, torch.Tensor)
-            and raw_logstd_prior.ndim == 0
+            isinstance(std_prior, (float, int))
+            or isinstance(std_prior, torch.Tensor)
+            and std_prior.ndim == 0
         ):
-            raw_logstd_prior = torch.ones_like(raw_logstd) * raw_logstd_prior
+            std_prior = torch.ones_like(std) * std_prior
     else:
         raise ValueError(
-            "If either mu_prior or raw_logstd_prior is provided, both must be provided"
+            "If either mu_prior or raw_std_prior is provided, both must be provided"
         )
     try:
-        q_logstd, q_std = _norm_raw_logstd(
-            raw_logstd,
-            logstd_norm_method,
-            norm_std_bound_min=logstd_norm_bound_min,
-            norm_std_bound_max=logstd_norm_bound_max,
-        )
-        p_logstd, p_std = _norm_raw_logstd(
-            raw_logstd_prior,
-            logstd_norm_method=logstd_norm_method if do_norm_prior else "none",
-            norm_std_bound_min=logstd_norm_bound_min,
-            norm_std_bound_max=logstd_norm_bound_max,
-        )
+        # q_logstd, q_std = norm_raw_logstd(
+        #     std,
+        #     logstd_norm_method,
+        #     norm_std_bound_min=logstd_norm_bound_min,
+        #     norm_std_bound_max=logstd_norm_bound_max,
+        # )
+        # p_logstd, p_std = norm_raw_logstd(
+        #     std_prior,
+        #     logstd_norm_method=logstd_norm_method if do_norm_prior else "none",
+        #     norm_std_bound_min=logstd_norm_bound_min,
+        #     norm_std_bound_max=logstd_norm_bound_max,
+        # )
 
         # --------------------------
         # Monte carlo KL divergence
         # --------------------------
         # 1. define the first two probabilities (in this case Normal for both)
-        # p = torch.distributions.Normal(
-        #     torch.ones_like(mu) * mu_prior, torch.ones_like(std) * std_prior
-        # )
-        # q = torch.distributions.Normal(mu, std)
+        p = torch.distributions.Normal(
+            torch.ones_like(mu) * mu_prior, torch.ones_like(std) * std_prior
+        )
+        q = torch.distributions.Normal(mu, std)
 
         # # 2. get the probabilities from the equation
         # # log(q(z|x)) - log(p(z))
         # log_qzx = q.log_prob(z)
         # log_pz = p.log_prob(z)
         # kl = (log_qzx - log_pz)
-        # kl = torch.distributions.kl_divergence(q, p)
+        kl = torch.distributions.kl_divergence(q, p)
 
-        kl = _base_gaussian_kl(mu_prior, p_std, p_logstd, mu, q_std, q_logstd)
+        # kl = _base_gaussian_kl(mu_prior, std_prior, p_logstd, mu, q_std, q_logstd)
         kl = kl.sum(-1)
 
     except ValueError as e:
@@ -187,31 +187,27 @@ def _reparam_sample(mu, std):
 
 def reparam_sample(
     mu,
-    raw_logstd,
-    logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
-    logstd_norm_bound_min: Optional[float] = None,
-    logstd_norm_bound_max: Optional[float] = None,
+    std
+    # raw_logstd,
+    # logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
+    # logstd_norm_bound_min: Optional[float] = None,
+    # logstd_norm_bound_max: Optional[float] = None,
 ):
     """Reparameterization trick for sampling from a Gaussian distribution.
 
     Args:
         mu (torch.Tensor): Mean of the Gaussian distribution
-        raw_logstd (torch.Tensor): Raw output of the network, corresponding to log std of the
-            Gaussian distribution
-        logstd_norm_method (str, optional): Normalization method for raw_logstd. Defaults to "none".
-            See Dehaene and Brossard 2021, “Re-Parameterizing VAEs for Stability.”
-        logstd_norm_bound_min (float, optional): Minimum bound for raw_logstd. Defaults to None.
-        logstd_norm_bound_max (float, optional): Maximum bound for raw_logstd. Defaults to None.
+        std (torch.Tensor): std of the Gaussian distribution
 
     Returns:
         torch.Tensor: Sample from the Gaussian distribution
     """
-    _, std = _norm_raw_logstd(
-        raw_logstd,
-        logstd_norm_method,
-        norm_std_bound_min=logstd_norm_bound_min,
-        norm_std_bound_max=logstd_norm_bound_max,
-    )
+    # _, std = norm_raw_logstd(
+    #     raw_logstd,
+    #     logstd_norm_method,
+    #     norm_std_bound_min=logstd_norm_bound_min,
+    #     norm_std_bound_max=logstd_norm_bound_max,
+    # )
 
     i = 0
     while i < 20:
@@ -226,17 +222,31 @@ def reparam_sample(
     else:
         print("Could not sample from N(0, 1) without NaNs after 20 tries")
         print("mu:", mu.max(), mu.min())
-        print("raw_logstd:", raw_logstd.max(), raw_logstd.min())
+        # print("raw_logstd:", raw_logstd.max(), raw_logstd.min())
         print("std:", std.max(), std.min())
         return torch.empty_like(mu).fill_(torch.nan)
 
 
-def _norm_raw_logstd(
+def norm_raw_logstd(
     logstd,
     logstd_norm_method: Literal["none", "explin", "bounded"] = "none",
     norm_std_bound_min: Optional[float] = None,
     norm_std_bound_max: Optional[float] = None,
 ):
+    """Normalizes the raw logstd.
+
+    Args:
+        logstd (torch.Tensor): Raw logstd
+        logstd_norm_method (str, optional): Normalization method for raw_logstd. Defaults to "none".
+        See Dehaene and Brossard 2021, “Re-Parameterizing VAEs for Stability.”
+        norm_std_bound_min (float, optional): Minimum bound for std derived from "bounded" methods.
+            Defaults to None for no bound.
+        norm_std_bound_max (float, optional): Maximum bound for std derived from "bounded" methods.
+            Defaults to None for no bound.
+
+    Returns:
+        torch.Tensor: Normalized logstd
+    """
     if logstd_norm_method == "none":
         return decode_raw_logstd_naive(logstd)
     elif logstd_norm_method == "explin":

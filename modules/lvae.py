@@ -1,8 +1,9 @@
+import numpy as np
 import torch
 from torch import nn
 from typing import List, Optional, Tuple
 
-from utils.vae_utils import reparam_sample
+from utils.vae_utils import reparam_sample, norm_raw_logstd
 from .transformers import VisionTransformer
 
 
@@ -71,10 +72,11 @@ class Ladder(nn.Module):
     def forward(self, x):
         ladder_outputs = []
         x = x.view(x.size(0), -1)
+        _x = x
         for layer in self.layers:
-            x = layer(x)
-            ladder_outputs.append(x)
-        return ladder_outputs
+            _x = layer(_x)
+            ladder_outputs.append(_x)
+        return ladder_outputs, x
 
 
 class LadderVAE(nn.Module):
@@ -135,79 +137,91 @@ class LadderVAE(nn.Module):
         self.ladder_dims = ladder_dims
         self.z_dims = z_dims
 
-    def forward(self, ladder_outputs: List[torch.Tensor]):
+        # # value based on Theis et al. 2016 “A Note on the Evaluation of Generative Models.”
+        # # uniform noise with std of 1/12, scaled from being appropriate for input [0,255] to [-1,1]
+        # self.patch_noise_std = nn.Parameter(
+        #     torch.tensor([np.sqrt(1 / 12 / 127.5)]), requires_grad=False
+        # )
+
+        self.inf_logstd_norm = "explin"
+        self.gen_logstd_norm = "bounded"
+        self.gen_std_bound_min = 0.001
+        self.gen_std_bound_max = 1.0
+
+    def forward(self, ladder_outputs: Tuple[List[torch.Tensor], torch.Tensor]):
+        ladder_outs_by_layer, x = ladder_outputs
         assert (
-            len(ladder_outputs) == self.n_vae_layers
+            len(ladder_outs_by_layer) == self.n_vae_layers
         ), "Ladder outputs should have same length as number of layers"
 
         # inference
-        mu_logvars_inf = []
-        for ladder_x, layer in zip(ladder_outputs, self.inference_layers):
+        mu_stds_inf = []
+        for ladder_x, layer in zip(ladder_outs_by_layer, self.inference_layers):
             distribution = layer(ladder_x)
             z_dim = int(distribution.size(1) / 2)
             assert z_dim == (distribution.size(1) / 2), "Inference latent dimension should be even"
-            mu, logvar = distribution[:, :z_dim], distribution[:, z_dim:]
-            mu_logvars_inf.append((mu, logvar))
+            mu, logstd = distribution[:, :z_dim], distribution[:, z_dim:]
+            _, std = norm_raw_logstd(logstd, self.inf_logstd_norm)
+            mu_stds_inf.append((mu, std))
 
         # generative
-        gen = self.generate(inference_mu_logvars=mu_logvars_inf)
+        gen = self.generate(inference_mu_stds=mu_stds_inf)
 
         return dict(
-            mu_logvars_inference=mu_logvars_inf,  # len(n_vae_layers)
-            mu_logvars_gen_prior=gen["mu_logvars_gen_prior"],  # len(n_vae_layers+1)
-            mu_logvars_gen=gen["mu_logvars_gen"],  # len(n_vae_layers+1)
+            mu_stds_inference=mu_stds_inf,  # len(n_vae_layers)
+            mu_stds_gen_prior=gen["mu_stds_gen_prior"],  # len(n_vae_layers+1)
+            mu_stds_gen=gen["mu_stds_gen"],  # len(n_vae_layers+1)
             sample_zs=gen["sample_zs"],  # len(n_vae_layers+1)
         )
 
     def generate(
         self,
-        inference_mu_logvars: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        inference_mu_stds: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
         top_z: Optional[torch.Tensor] = None,
-        top_gen_prior_mu_logvar: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        top_gen_prior_mu_std: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         assert (
-            inference_mu_logvars is not None
-            or top_z is not None
-            or top_gen_prior_mu_logvar is not None
-        ), "Must provide inference mu+logvar or top z or top generative prior mu+logvar"
+            inference_mu_stds is not None or top_z is not None or top_gen_prior_mu_std is not None
+        ), "Must provide inference mu+std or top z or top generative prior mu+std"
 
         assert (top_z is None) or (
-            top_gen_prior_mu_logvar is None
+            top_gen_prior_mu_std is None
         ), "If providing top z, top generative prior parameters are meaningless"
 
         if top_z is not None:
-            mu_logvars_gen_prior = [(None, None)]
-            mu_logvars_gen = [(None, None)]
+            mu_stds_gen_prior = [(None, None)]
+            mu_stds_gen = [(None, None)]
             sample_zs = []
-        elif top_gen_prior_mu_logvar is not None:
-            mu_logvars_gen_prior = [top_gen_prior_mu_logvar]
-            mu_logvars_gen = []
+        elif top_gen_prior_mu_std is not None:
+            mu_stds_gen_prior = [top_gen_prior_mu_std]
+            mu_stds_gen = []
             sample_zs = []
         else:
-            mu_logvars_gen_prior = [(None, None)]
-            mu_logvars_gen = []
+            mu_stds_gen_prior = [(None, None)]
+            mu_stds_gen = []
             sample_zs = []
 
         for i, layer in reversed(list(enumerate(self.generative_layers))):
             is_top_layer = i == len(self.generative_layers) - 1
+            is_bottom_layer = i == 0
 
             if is_top_layer and top_z is not None:
                 z = top_z
             else:
-                # get prior mu, logvar
-                mu_gen_prior, logvar_gen_prior = mu_logvars_gen_prior[0]
+                # get prior mu, std
+                mu_gen_prior, std_gen_prior = mu_stds_gen_prior[0]
 
-                # get inference mu, logvar
-                mu_inf, logvar_inf = (
-                    inference_mu_logvars[i] if inference_mu_logvars is not None else (None, None)
+                # get inference mu, std
+                mu_inf, std_inf = (
+                    inference_mu_stds[i] if inference_mu_stds is not None else (None, None)
                 )
 
-                if is_top_layer and mu_gen_prior is None and logvar_gen_prior is None:
+                if is_top_layer and mu_gen_prior is None and std_gen_prior is None:
                     # if no prior, use inference
-                    mu, logvar = mu_inf, logvar_inf
-                elif mu_inf is None and logvar_inf is None:
+                    mu, std = mu_inf, std_inf
+                elif mu_inf is None and std_inf is None:
                     # if no inference (i.e. generation), use prior
-                    mu, logvar = mu_gen_prior, logvar_gen_prior
+                    mu, std = mu_gen_prior, std_gen_prior
                 else:
                     # combine inference and generative parameters by inverse variance weighting
                     # TODO: there has to be a way to do this without exponentiation
@@ -216,46 +230,66 @@ class LadderVAE(nn.Module):
 
                     # TODO! REWRITE TO USE STDS AND NORMS
 
-                    _var_inf = torch.exp(logvar_inf)
-                    _var_gen = torch.exp(logvar_gen_prior)
+                    # _, _std_inf = decode_raw_logstd_explin(std_inf)
+                    # _, _std_gen_prior = decode_raw_logstd_explin(std_gen_prior)
+
+                    _var_inf = std_inf.pow(2)
+                    _var_gen = std_gen_prior.pow(2)
 
                     var = 1 / (1 / _var_inf + 1 / _var_gen)
                     mu = var * (mu_inf / _var_inf + mu_gen_prior / _var_gen)
-                    logvar = torch.log(var)
+                    std = torch.sqrt(var)
 
-                mu_logvars_gen.insert(0, (mu, logvar))
+                mu_stds_gen.insert(0, (mu, std))
                 # generate sample
-                z = reparam_sample(mu, logvar)
+                z = reparam_sample(mu, std)
             sample_zs.insert(0, z)
 
-            # create next prior mu, logvar from sample
+            # create next prior mu, std from sample
             distribution = layer(z)
             z_dim = int(distribution.size(1) / 2)
             assert z_dim == (distribution.size(1) / 2), "Generative latent dimension should be even"
-            next_mu_gen_prior, next_logvar_gen_prior = (
+            next_mu_gen_prior, next_raw_logstd_gen_prior = (
                 distribution[:, :z_dim],
                 distribution[:, z_dim:],
             )
-            mu_logvars_gen_prior.insert(0, (next_mu_gen_prior, next_logvar_gen_prior))
+            # if is_bottom_layer:
+            #     _, next_std_gen_prior = norm_raw_logstd(
+            #         next_raw_logstd_gen_prior, "bounded", self.patch_noise_std, 1.0
+            #     )
+            # else:
+            if self.gen_logstd_norm == "constant":
+                next_std_gen_prior = torch.ones_like(next_raw_logstd_gen_prior)
+            elif self.gen_logstd_norm == "explin":
+                _, next_std_gen_prior = norm_raw_logstd(next_raw_logstd_gen_prior, "explin")
+            elif self.gen_logstd_norm == "bounded":
+                _, next_std_gen_prior = norm_raw_logstd(
+                    next_raw_logstd_gen_prior,
+                    "bounded",
+                    self.gen_std_bound_min,
+                    self.gen_std_bound_max,
+                )
+
+            mu_stds_gen_prior.insert(0, (next_mu_gen_prior, next_std_gen_prior))
 
         # sample patch
-        patch_mu_gen_prior, patch_logvar_gen_prior = mu_logvars_gen_prior[0]
-        mu_logvars_gen.insert(
-            0, (patch_mu_gen_prior, patch_logvar_gen_prior)
+        patch_mu_gen_prior, patch_std_gen_prior = mu_stds_gen_prior[0]
+        mu_stds_gen.insert(
+            0, (patch_mu_gen_prior, patch_std_gen_prior)
         )  # image generated from prior
-        patch = reparam_sample(patch_mu_gen_prior, patch_logvar_gen_prior)
+        patch = reparam_sample(patch_mu_gen_prior, patch_std_gen_prior)
         sample_zs.insert(0, patch)
 
         assert (
-            len(mu_logvars_gen_prior)
-            == len(mu_logvars_gen)
+            len(mu_stds_gen_prior)
+            == len(mu_stds_gen)
             == len(sample_zs)
             == len(self.generative_layers) + 1
         )
 
         return dict(
-            mu_logvars_gen_prior=mu_logvars_gen_prior,  # len(n_vae_layers+1)
-            mu_logvars_gen=mu_logvars_gen,  # len(n_vae_layers+1)
+            mu_stds_gen_prior=mu_stds_gen_prior,  # len(n_vae_layers+1)
+            mu_stds_gen=mu_stds_gen,  # len(n_vae_layers+1)
             sample_zs=sample_zs,  # len(n_vae_layers+1)
         )
 
@@ -297,6 +331,8 @@ class NextPatchPredictor(nn.Module):
             dropout=0,
         )
 
+        self.loc_std_min = 0.01
+
     def forward(
         self,
         patch_step_zs: List[List[torch.Tensor]],
@@ -313,15 +349,15 @@ class NextPatchPredictor(nn.Module):
         device = top_zs[0].device
 
         if forced_next_location is not None:
-            next_pos, next_pos_mu, next_pos_logvar = forced_next_location, None, None
+            next_pos, next_pos_mu, next_pos_std = forced_next_location, None, None
         elif self.do_random_foveation or randomize_next_location:
-            next_pos, next_pos_mu, next_pos_logvar = (
+            next_pos, next_pos_mu, next_pos_std = (
                 self._get_random_foveation_pos(b, device=device),
                 None,
                 None,
             )
         else:
-            next_pos, next_pos_mu, next_pos_logvar = self.pred_next_location(patch_step_zs)
+            next_pos, next_pos_mu, next_pos_std = self.pred_next_location(patch_step_zs)
 
         next_patch_gen_dict = self.generate_next_patch_zs(patch_step_zs, next_pos)
 
@@ -330,7 +366,7 @@ class NextPatchPredictor(nn.Module):
             position=dict(
                 next_pos=next_pos,
                 next_pos_mu=next_pos_mu,
-                next_pos_logvar=next_pos_logvar,
+                next_pos_std=next_pos_std,
             ),
         )
 
@@ -339,13 +375,17 @@ class NextPatchPredictor(nn.Module):
 
         prev_top_zs = self._get_zs_from_level(patch_step_zs, Z_LEVEL_TO_PRED_LOC)
         pred = self.next_location_predictor(prev_top_zs)
-        next_loc_mu, next_loc_logvar = pred[:, :2], pred[:, 2:]
-        next_loc = reparam_sample(next_loc_mu, next_loc_logvar)
+        next_loc_mu, next_loc_raw_logstd = pred[:, :2], pred[:, 2:]
+
+        # TODO: make params for this
+        _, next_loc_std = norm_raw_logstd(next_loc_raw_logstd, "bounded", self.loc_std_min, 1.0)
+
+        next_loc = reparam_sample(next_loc_mu, next_loc_std)
 
         return (
             torch.clamp(next_loc, -1, 1),
             next_loc_mu,
-            next_loc_logvar,
+            next_loc_std,
         )
 
     def generate_next_patch_zs(
@@ -366,14 +406,23 @@ class NextPatchPredictor(nn.Module):
         )
 
         next_top_z_pred = self.top_z_predictor(prev_top_zs_with_pos)
-        next_top_z_mu, next_top_z_logvar = (
+        next_top_z_mu, next_top_z_raw_logstd = (
             next_top_z_pred[:, : self.z_dims[-1]],
             next_top_z_pred[:, self.z_dims[-1] :],
         )
-        # next_top_z = reparam_sample(next_top_z_mu, next_top_z_logvar)
+
+        # TODO: parameterize instead of reusing ladder_vae's implicitly
+        _, next_top_z_std = norm_raw_logstd(
+            next_top_z_raw_logstd,
+            self.ladder_vae.gen_logstd_norm,
+            self.ladder_vae.gen_std_bound_min,
+            self.ladder_vae.gen_std_bound_max,
+        )
+
+        # next_top_z = reparam_sample(next_top_z_mu, next_top_z_logstd)
 
         next_patch_gen_dict = self.ladder_vae.generate(
-            top_gen_prior_mu_logvar=(next_top_z_mu, next_top_z_logvar)
+            top_gen_prior_mu_std=(next_top_z_mu, next_top_z_std)
         )
 
         return next_patch_gen_dict
@@ -385,5 +434,3 @@ class NextPatchPredictor(nn.Module):
 
     def _get_random_foveation_pos(self, batch_size: int, device: torch.device = None):
         return torch.rand((batch_size, 2), device=device) * 2 - 1
-
-
