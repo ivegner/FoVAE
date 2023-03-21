@@ -10,7 +10,7 @@ trainer:
   enable_model_summary: true
   num_sanity_val_steps: 2
   reload_dataloaders_every_n_epochs: 10
-  strategy: ddp
+  strategy: null
   # defaults:
   callbacks: null
   default_root_dir: null

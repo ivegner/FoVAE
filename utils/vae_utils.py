@@ -73,7 +73,7 @@ def gaussian_kl_divergence(
 
     if mu_prior is None and std_prior is None:
         mu_prior = torch.zeros_like(mu)
-        std_prior = torch.zeros_like(std)
+        std_prior = torch.ones_like(std)
         # do_norm_prior = False
     elif mu_prior is not None and std_prior is not None:
         if (
