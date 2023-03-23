@@ -186,12 +186,12 @@ class FoVAE(pl.LightningModule):
 
         DO_KL_ON_INPUT_LEVEL = False
 
-        curr_patch_rec_total_loss = 0.0
-        curr_patch_kl_div_total_loss = 0.0
-        next_patch_pos_kl_div_total_loss = 0.0
-        next_patch_rec_total_loss = 0.0
-        next_patch_kl_div_total_loss = 0.0
-        image_reconstruction_loss = 0.0
+        curr_patch_rec_total_loss = torch.tensor(0.0, device=x.device)
+        curr_patch_kl_div_total_loss = torch.tensor(0.0, device=x.device)
+        next_patch_pos_kl_div_total_loss = torch.tensor(0.0, device=x.device)
+        next_patch_rec_total_loss = torch.tensor(0.0, device=x.device)
+        next_patch_kl_div_total_loss = torch.tensor(0.0, device=x.device)
+        image_reconstruction_loss = torch.tensor(0.0, device=x.device)
         curr_patch_kl_divs_by_layer, next_patch_rec_losses_by_layer, next_patch_kl_divs_by_layer = (
             [],
             [],
