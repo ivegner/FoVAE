@@ -1,6 +1,8 @@
 .vscode/
 data/
 lightning_logs*/
+artifacts/
+wandb/
 **/.DS_Store
 *.txt
 

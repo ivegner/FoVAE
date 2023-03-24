@@ -11,7 +11,7 @@ import torch.nn.init as init
 import torchvision
 from torch import nn, optim
 from timeit import default_timer as timer
-
+import wandb
 
 import utils.foveation as fov_utils
 from modules.lvae import Ladder, LadderVAE, NextPatchPredictor
@@ -21,7 +21,7 @@ from utils.vae_utils import (
     free_bits_kl,
     reparam_sample,
 )
-from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters
+from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters, fig_to_nparray
 from utils.misc import recursive_to, recursive_detach
 
 # from memory_profiler import profile
@@ -166,6 +166,8 @@ class FoVAE(pl.LightningModule):
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
+
+        self.save_hyperparameters()
 
     def to(self, *args, **kwargs):
         if ("device" in kwargs and kwargs["device"].type == "mps") or any(
@@ -867,13 +869,16 @@ class FoVAE(pl.LightningModule):
                 samples.append(row_samples)
         return samples
 
+    def on_fit_start(self):
+        self.trainer.logger.watch(self, log_freq=10)
+
     def training_step(self, batch, batch_idx):
         x, y = batch
         forward_out = self.forward(x, y)
         # total_loss = forward_out["losses"].pop("total_loss")
         total_loss = forward_out["losses"]["total_loss"]
         # self.log("train_total_loss", total_loss, prog_bar=True)
-        self.log_dict({"train_" + k: v.detach().item() for k, v in forward_out["losses"].items()})
+        self.log_dict({"train/" + k: v.detach().item() for k, v in forward_out["losses"].items()})
         patch_noise_std_mean = self.patch_noise_std.detach().mean().item()
         self.log("patch_noise_std_mean", patch_noise_std_mean, logger=True, on_step=True)
 
@@ -902,26 +907,24 @@ class FoVAE(pl.LightningModule):
         x, y = batch
         forward_out = self.forward(x, y)
         total_loss = forward_out["losses"]["total_loss"]
-        self.log_dict({"val_" + k: v.detach().item() for k, v in forward_out["losses"].items()})
+        self.log_dict({"val/" + k: v.detach().item() for k, v in forward_out["losses"].items()})
 
         # plot kl divergences by layer on the same plots
-        curr_patch_kl_divs_by_layer = forward_out["losses_by_layer"][
-            "curr_patch_kl_divs_by_layer"
-        ]
+        curr_patch_kl_divs_by_layer = forward_out["losses_by_layer"]["curr_patch_kl_divs_by_layer"]
         _curr_kl_divs = {
-            f"curr_patch_kl_l{i}": v.detach().item()
+            f"val/curr_patch_kl_l{i}": v.detach().item()
             for i, v in enumerate(curr_patch_kl_divs_by_layer)
         }
-        self.log("val_curr_patch_kl_by_layer", _curr_kl_divs)
+        self.log_dict(_curr_kl_divs)
         if self.do_next_patch_prediction:
             next_patch_kl_divs_by_layer = forward_out["losses_by_layer"][
                 "next_patch_kl_divs_by_layer"
             ]
             _next_kl_divs = {
-                f"next_patch_kl_l{i}": v.detach().item()
+                f"val/next_patch_kl_l{i}": v.detach().item()
                 for i, v in enumerate(next_patch_kl_divs_by_layer)
             }
-            self.log("val_next_patch_kl_by_layer", _next_kl_divs)
+            self.log_dict(_next_kl_divs)
 
         step_sample_zs = forward_out["step_vars"]["real_patch_zs"]
         # step_z_recons = forward_out["step_vars"]["z_recons"]
@@ -939,7 +942,6 @@ class FoVAE(pl.LightningModule):
 
         if batch_idx == 0:
             N_TO_PLOT = 4
-            tensorboard = self.logger.experiment
             # real = torchvision.utils.make_grid(x).cpu()
             # recon = torchvision.utils.make_grid(x_recon).cpu()
             # img = torch.concat((real, recon), dim=1)
@@ -1015,9 +1017,7 @@ class FoVAE(pl.LightningModule):
                 )
                 for i in range(N_TO_PLOT):
                     imshow_unnorm(step_patch_batch[i].cpu(), ax=axs[i][2][step])
-                    axs[i][2][step].set_title(
-                        f"Patch reconstruction at step {step}", fontsize=8
-                    )
+                    axs[i][2][step].set_title(f"Patch reconstruction at step {step}", fontsize=8)
 
             # plot next patch predictions
             if self.do_next_patch_prediction:
@@ -1051,66 +1051,68 @@ class FoVAE(pl.LightningModule):
             # add to tensorboard
             for i, fig in enumerate(figs):
                 fig.tight_layout()
-                tensorboard.add_figure(
-                    f"Foveation Vis {i}", figs[i], global_step=self.global_step
-                )
-                del fig
 
+            self.logger.log_image(
+                key="Foveation Visualizations",
+                images=[fig_to_nparray(f) for f in figs],
+            )
+
+            del figs
             plt.close("all")
 
             # if self.do_image_reconstruction:
             _, reconstructed_images = self._reconstruct_image(
-                [
-                    [level[:N_TO_PLOT].to(self.device) for level in step]
-                    for step in step_sample_zs
-                ],
+                [[level[:N_TO_PLOT].to(self.device) for level in step] for step in step_sample_zs],
                 image=None,
                 return_patches=True,
             )
             reconstructed_images = reconstructed_images.cpu()
 
-            for i in range(N_TO_PLOT):
-                # ax = axs[i]
-                # imshow_unnorm(patches[i].cpu(), ax=ax)
-                # ax.set_title(
-                #     f"Next patch pred. at step {step} - "
-                #     f"({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
-                #     fontsize=8,
-                # )
-                tensorboard.add_image(
-                    f"Image Reconstructions {i}",
+            reconstructed_images = [
+                torchvision.utils.make_grid(
+                    remove_pos_channels_from_batch(self._patch_to_fovea(r)) / 2 + 0.5,
+                    nrow=int(np.sqrt(len(r))),
+                    padding=1,
+                )
+                for r in reconstructed_images
+            ]
+
+            self.logger.log_image(
+                key="Image Reconstructions",
+                images=reconstructed_images,
+            )
+
+            self.logger.log_image(
+                "Real Patches",
+                [
                     torchvision.utils.make_grid(
                         remove_pos_channels_from_batch(
-                            self._patch_to_fovea(reconstructed_images[i])
-                        )
-                        / 2
-                        + 0.5,
-                        nrow=int(np.sqrt(len(reconstructed_images[i]))),
+                            patches[0][:32].view(
+                                -1, self.num_channels, self.patch_dim, self.patch_dim
+                            )
+                            / 2
+                            + 0.5
+                        ).cpu(),
+                        nrow=8,
                         padding=1,
-                    ),
-                    global_step=self.global_step,
-                )
-
-            # step constant bc real images don't change
-            tensorboard.add_images(
-                "Real Patches",
-                remove_pos_channels_from_batch(
-                    patches[0][:32].view(-1, self.num_channels, self.patch_dim, self.patch_dim)
-                    / 2
-                    + 0.5
-                ).cpu(),
-                global_step=0,
-            )
-            tensorboard.add_images(
-                "Reconstructed Patches",
-                remove_pos_channels_from_batch(
-                    step_sample_zs[0][0][:32].view(
-                        -1, self.num_channels, self.patch_dim, self.patch_dim
                     )
-                    / 2
-                    + 0.5
-                ).cpu(),
-                global_step=self.global_step,
+                ],
+            )
+            self.logger.log_image(
+                "Reconstructed Patches",
+                [
+                    torchvision.utils.make_grid(
+                        remove_pos_channels_from_batch(
+                            step_sample_zs[0][0][:32].view(
+                                -1, self.num_channels, self.patch_dim, self.patch_dim
+                            )
+                            / 2
+                            + 0.5
+                        ).cpu(),
+                        nrow=8,
+                        padding=1,
+                    )
+                ],
             )
 
             def stack_traversal_output(g):
@@ -1130,29 +1132,30 @@ class FoVAE(pl.LightningModule):
             )
             images_by_row_and_interp = stack_traversal_output(traversal_abs)
 
-            tensorboard.add_image(
+            self.logger.log_image(
                 "Absolute Latent Traversal",
-                torchvision.utils.make_grid(
-                    torch.concat(images_by_row_and_interp), nrow=self.z_dims[-1]
-                ),
-                global_step=self.global_step,
+                [
+                    torchvision.utils.make_grid(
+                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[-1]
+                    )
+                ],
             )
             traversal_around = self.latent_traverse(
                 first_step_zs, z_level=z_level, range_limit=3, step=0.5, around_z=True
             )
             images_by_row_and_interp = stack_traversal_output(traversal_around)
 
-            tensorboard.add_image(
+            self.logger.log_image(
                 "Latent Traversal Around Z",
-                torchvision.utils.make_grid(
-                    torch.concat(images_by_row_and_interp), nrow=self.z_dims[-1]
-                ),
-                global_step=self.global_step,
+                [
+                    torchvision.utils.make_grid(
+                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[-1]
+                    ),
+                ],
             )
 
             del (
                 real_images,
-                figs,
                 axs,
                 reconstructed_images,
                 images_by_row_and_interp,

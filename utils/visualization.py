@@ -1,7 +1,17 @@
+import io
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+def fig_to_nparray(fig):
+    """Convert a Matplotlib figure to a numpy array with RGBA channels and return it."""
+    with io.BytesIO() as buff:
+        fig.savefig(buff, format='raw')
+        buff.seek(0)
+        data = np.frombuffer(buff.getvalue(), dtype=np.uint8)
+    w, h = fig.canvas.get_width_height()
+    im = data.reshape((int(h), int(w), -1))
+    return im
 
 # functions to show an image
 def imshow_unnorm(img: torch.Tensor, ax=None):

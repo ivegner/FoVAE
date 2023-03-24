@@ -1,0 +1,62 @@
+# save_config_callback_filename: another-name-config.yaml  # See https://github.com/PyTorchLightning/pytorch-lightning/pull/7675
+trainer:
+  default_root_dir: checkpoints
+  gradient_clip_val: null
+  check_val_every_n_epoch: 1
+  max_epochs: 3000
+  log_every_n_steps: 20
+  accelerator: mps
+  logger:
+    class_path: pytorch_lightning.loggers.WandbLogger
+    init_args:
+      project: FoVAE
+      log_model: all
+      resume: must
+  callbacks:
+  - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+    init_args:
+      # every_n_val_epochs: 1   # Mutually exclusive with every_n_train_steps
+      # every_n_train_steps: 10  # Mutually exclusive with every_n_val_epochs - use small values e.g. 10 only for debugging
+      save_top_k: 1
+      save_last: True
+      monitor: val/total_loss
+      mode: min
+      filename: '{epoch}-{step}-{validation_loss:.3f}'
+data:
+  batch_size: 2048
+model:
+  num_steps: 4
+  ladder_dims:
+  - 36
+  # - 25
+  z_dims:
+  # - 20
+  - 10
+  ladder_hidden_dims:
+  # - - 256
+  #   - 256
+  - - 256
+    - 256
+  lvae_inf_hidden_dims:
+  # - - 256
+  #   - 256
+  - - 256
+    - 256
+  lvae_gen_hidden_dims:
+  # - - 256
+  #   - 256
+  - - 256
+    - 256
+  npp_embed_dim: 256
+  npp_hidden_dim: 512
+  npp_num_heads: 1
+  npp_num_layers: 3
+  lr: 0.001
+  beta: 0.5
+  free_bits_kl: 1
+  do_use_beta_norm: false
+  do_random_foveation: false
+  do_image_reconstruction: true
+  do_next_patch_prediction: true
+  reconstruct_fovea_only: false
+  image_reconstruction_frac: 0.1

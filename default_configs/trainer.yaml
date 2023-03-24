@@ -2,7 +2,7 @@ trainer:
   logger: true
   enable_checkpointing: true
   gradient_clip_val: 100
-  track_grad_norm: 2
+  track_grad_norm: -1
   check_val_every_n_epoch: 1
   max_epochs: 3000
   log_every_n_steps: 10

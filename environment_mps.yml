@@ -19,4 +19,5 @@ dependencies:
       - "pytorch-lightning[extra]<2.0" # TODO
       - tensorboard
       - black
+      - wandb
 
