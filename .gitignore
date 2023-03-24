@@ -5,6 +5,7 @@ artifacts/
 wandb/
 **/.DS_Store
 *.txt
+checkpoints/
 
 _snippets.py
 **/*.png
