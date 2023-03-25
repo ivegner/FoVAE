@@ -1,6 +1,5 @@
 # save_config_callback_filename: another-name-config.yaml  # See https://github.com/PyTorchLightning/pytorch-lightning/pull/7675
 trainer:
-  default_root_dir: checkpoints
   gradient_clip_val: null
   check_val_every_n_epoch: 1
   max_epochs: 3000

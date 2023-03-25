@@ -131,17 +131,17 @@ def get_default_gaussian_foveation_filter_params(
     ring_sigma_scaling_factor=1,
     device=None,
 ):  # ring_sigmas: List[float]):
-    """Get default gaussian foveation filter params (mus and sigmas) for a given image size
-    and fovea radius
+    """Get default gaussian foveation params (mus, sigmas) for given image size and fovea radius.
 
     Args:
         image_dim: [height, width] of image
         fovea_radius: radius of fovea in pixels
         image_out_dim: output image dimension (must be even)
         ring_sigma_scaling_factor: scaling factor for consequent ring sigmas (default: 1)
+        device: device to put filter params on (default: None)
 
     Returns:
-
+        dict: gaussian foveation filter params
     """
     h, w = image_dim
 
@@ -302,10 +302,13 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict, me
             batch_idx, channel_idx, x_idx, y_idx
         ]
 
+    eps = 1e-6
+
     for i, ring in enumerate([foveation_params["fovea"], *foveation_params["peripheral_rings"]]):
         scale_factor = scale_factors[i]
         target_indices = ring["target_indices"].long()
-        source_indices = torch.floor((ring["mus"] - 0.5) / scale_factor).long()
+        # add eps to prevent even divisions
+        source_indices = torch.floor((ring["mus"] - 0.5) / (scale_factor + eps)).long()
         n_indices = source_indices.size(1)
         batch_idx = torch.arange(b).view(b, 1, 1).expand(-1, c, n_indices).long()
         channel_idx = torch.arange(c).view(1, c, 1).expand(b, c, n_indices).long()
