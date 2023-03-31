@@ -48,11 +48,19 @@ class FoVAE(pl.LightningModule):
         foveation_padding: Union[Literal["max"], int] = "max",
         foveation_padding_mode: Literal["zeros", "replicate"] = "replicate",
         lr=1e-3,
-        beta=1,
+        betas: dict = dict(
+            curr_patch_recon=1,
+            curr_patch_kl=1,
+            next_patch_pos_kl=1,
+            next_patch_recon=1,
+            next_patch_kl=1,
+            image_recon=1,
+            spectral_norm=0,
+        ),
         free_bits_kl=0,
         # n_spectral_iter=1,
         grad_skip_threshold=-1,
-        do_use_beta_norm=True,
+        # do_use_beta_norm=True,
         do_random_foveation=False,
         do_image_reconstruction=True,
         do_next_patch_prediction=True,
@@ -123,29 +131,21 @@ class FoVAE(pl.LightningModule):
             #         isinstance(layer, SyncBatchNormSwish):
             #     self.all_bn_layers.append(layer)
 
-        self._beta = beta
+        # self._beta = beta
 
         self.grad_skip_threshold = grad_skip_threshold
 
-        # TODO
-        if do_use_beta_norm:
-            beta_vae = (beta * z_dims[0]) / input_dim  # according to beta-vae paper
-            print(
-                f"Using normalized betas[1] value of {beta_vae:.6f} as beta, "
-                f"calculated from unnormalized beta_vae {beta:.6f}"
-            )
-        else:
-            beta_vae = beta
+        # # TODO
+        # if do_use_beta_norm:
+        #     beta_vae = (beta * z_dims[0]) / input_dim  # according to beta-vae paper
+        #     print(
+        #         f"Using normalized betas[1] value of {beta_vae:.6f} as beta, "
+        #         f"calculated from unnormalized beta_vae {beta:.6f}"
+        #     )
+        # else:
+        #     beta_vae = beta
 
-        self.betas = dict(
-            curr_patch_recon=2,
-            curr_patch_kl=beta_vae,
-            next_patch_pos_kl=1,
-            next_patch_recon=1,
-            next_patch_kl=beta_vae,
-            image_recon=5,
-            spectral_norm=0,
-        )
+        self.betas = betas
 
         self.free_bits_kl = free_bits_kl
 
@@ -872,7 +872,7 @@ class FoVAE(pl.LightningModule):
         return samples
 
     def on_fit_start(self):
-        self.trainer.logger.watch(self, log_freq=10)
+        self.trainer.logger.watch(self, log_freq=10, log_graph=False)
 
     def training_step(self, batch, batch_idx):
         x, y = batch

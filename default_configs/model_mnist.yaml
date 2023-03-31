@@ -24,10 +24,17 @@ model:
   foveation_padding: max
   foveation_padding_mode: replicate
   lr: 0.001
-  beta: 0.2
+  betas:
+    curr_patch_recon: 1
+    curr_patch_kl: 1
+    next_patch_pos_kl: 1
+    next_patch_recon: 1
+    next_patch_kl: 1
+    image_recon: 1
+    spectral_norm: 0
   free_bits_kl: 0.5
   grad_skip_threshold: -1
-  do_use_beta_norm: false
+  # do_use_beta_norm: false
   do_random_foveation: false
   do_image_reconstruction: true
   do_next_patch_prediction: true
