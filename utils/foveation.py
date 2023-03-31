@@ -31,12 +31,20 @@ def _get_indices_in_ring(x_extent, y_extent, x_center, y_center, radius):
 
 
 def get_generic_sampled_ring_indices(
-    x_extent, y_extent, x_center, y_center, fovea_radius, max_ring_radius, num_peri_rings_to_attempt
+    x_extent,
+    y_extent,
+    x_center,
+    y_center,
+    fovea_radius,
+    max_ring_radius,
+    num_peri_rings_to_attempt,
+    # peri_ring_radii=None,
 ):
     """Get indices of pixels in a square foveated image of given radius centered at
     (x_center, y_center)
     """
 
+    # if peri_ring_radii is None:
     # get peri indices
     a = np.exp((np.log(max_ring_radius / fovea_radius)) / num_peri_rings_to_attempt)
     peri_ring_radii = np.floor(
@@ -46,6 +54,10 @@ def get_generic_sampled_ring_indices(
         [fovea_radius < r <= max_ring_radius for r in peri_ring_radii]
     ).astype(bool)
     peri_ring_radii = peri_ring_radii[eligible_radius_mask].astype(int)
+    # else:
+    #     assert isinstance(peri_ring_radii, List)
+    #     assert all([isinstance(r, int) for r in peri_ring_radii])
+    #     assert all([fovea_radius < r <= max_ring_radius for r in peri_ring_radii])
     num_peri_rings = len(peri_ring_radii)
 
     foveated_im_dim = 2 * (fovea_radius + num_peri_rings)
@@ -129,6 +141,7 @@ def get_default_gaussian_foveation_filter_params(
     fovea_radius: int,
     image_out_dim: int,
     ring_sigma_scaling_factor=1,
+    max_ring_radius=None,
     device=None,
 ):  # ring_sigmas: List[float]):
     """Get default gaussian foveation params (mus, sigmas) for given image size and fovea radius.
@@ -138,6 +151,7 @@ def get_default_gaussian_foveation_filter_params(
         fovea_radius: radius of fovea in pixels
         image_out_dim: output image dimension (must be even)
         ring_sigma_scaling_factor: scaling factor for consequent ring sigmas (default: 1)
+        max_ring_radius: max radius of peripheral ring (default: None, which is image_dim//2)
         device: device to put filter params on (default: None)
 
     Returns:
@@ -156,7 +170,10 @@ def get_default_gaussian_foveation_filter_params(
     assert image_out_dim % 2 == 0, f"Image out dim must be even (got: {image_out_dim})"
 
     num_peri_rings = int(image_out_dim / 2) - fovea_radius
-    max_ring_radius = min(h, w) // 2
+    if max_ring_radius is None:
+        max_ring_radius = min(h, w) // 2
+    else:
+        assert int(max_ring_radius) == max_ring_radius, f"max_ring_radius must be int (got: {max_ring_radius})"
 
     generic_center_x, generic_center_y = w // 2, h // 2
     generic_ring_specs = get_generic_sampled_ring_indices(
@@ -216,6 +233,7 @@ def get_default_gaussian_foveation_filter_params(
 Z_EPS = 1e-2
 
 # import pprofile
+
 
 def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict, memo: dict = None):
     """Sample image according to foveation params, sampling each peripheral point based
@@ -285,7 +303,12 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict, me
         )  # TODO: there's really one sigma per ring, shouldn't have to average them
         scale_factors.append(scale_factor)
 
-    if memo and "pyramid" in memo and memo["image"] is image and memo["scale_factors"] == scale_factors:
+    if (
+        memo
+        and "pyramid" in memo
+        and memo["image"] is image
+        and memo["scale_factors"] == scale_factors
+    ):
         # print("reusing memoized pyramid", flush=True)
         pyramid = memo["pyramid"]
     else:

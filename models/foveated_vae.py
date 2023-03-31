@@ -35,6 +35,7 @@ class FoVAE(pl.LightningModule):
         patch_dim=6,
         patch_channels=3,
         patch_ring_scaling_factor=2.0,
+        patch_max_ring_radius=None, # None defaults to half of image
         num_steps: int = 1,
         ladder_dims: List[int] = [25],
         z_dims: List[int] = [10],
@@ -158,6 +159,7 @@ class FoVAE(pl.LightningModule):
                 image_out_dim=patch_dim,
                 # in pyramidal case, pixel ring i averages ring_scaling_factor^i pixels
                 ring_sigma_scaling_factor=patch_ring_scaling_factor,
+                max_ring_radius=patch_max_ring_radius,
             )
         )
         self.do_random_foveation = do_random_foveation
@@ -1060,7 +1062,6 @@ class FoVAE(pl.LightningModule):
                 images=fov_vis,
             )
 
-            del figs
             plt.close("all")
 
             # if self.do_image_reconstruction:
@@ -1158,6 +1159,7 @@ class FoVAE(pl.LightningModule):
             )
 
             del (
+                figs,
                 real_images,
                 axs,
                 reconstructed_images,
