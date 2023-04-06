@@ -25,7 +25,7 @@ from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameter
 from utils.misc import recursive_to, recursive_detach
 
 # from memory_profiler import profile
-
+plt.ioff()
 
 class FoVAE(pl.LightningModule):
     def __init__(

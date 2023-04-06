@@ -21,7 +21,6 @@ def imshow_unnorm(img: torch.Tensor, ax=None):
         ax.imshow(npimg, extent=(0, npimg.shape[0], npimg.shape[1], 0))
     else:
         plt.imshow(npimg, extent=(0, npimg.shape[0], npimg.shape[1], 0))
-        plt.show()
 
 
 def plot_gaussian_foveation_parameters(
