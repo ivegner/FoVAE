@@ -1,3 +1,4 @@
+from copy import deepcopy
 import numpy as np
 import torch
 from torch import nn
@@ -148,7 +149,11 @@ class LadderVAE(nn.Module):
         self.gen_std_bound_min = 0.001
         self.gen_std_bound_max = 1.0
 
-    def forward(self, ladder_outputs: Tuple[List[torch.Tensor], torch.Tensor]):
+    def forward(
+        self,
+        ladder_outputs: Tuple[List[torch.Tensor], torch.Tensor],
+        top_gen_prior_mu_std: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ):
         ladder_outs_by_layer, x = ladder_outputs
         assert (
             len(ladder_outs_by_layer) == self.n_vae_layers
@@ -165,7 +170,7 @@ class LadderVAE(nn.Module):
             mu_stds_inf.append((mu, std))
 
         # generative
-        gen = self.generate(inference_mu_stds=mu_stds_inf)
+        gen = self.generate(inference_mu_stds=mu_stds_inf, top_gen_prior_mu_std=top_gen_prior_mu_std)
 
         return dict(
             mu_stds_inference=mu_stds_inf,  # len(n_vae_layers)
@@ -304,12 +309,17 @@ class NextPatchPredictor(nn.Module):
         num_heads: int = 1,
         num_layers: int = 3,
         do_random_foveation: bool = False,
+        do_lateral_connections: bool = True,
     ):
         super().__init__()
 
-        self.ladder_vae = ladder_vae
+        # reuse generative layers from ladder vae
+        self.ladder_vae = deepcopy(ladder_vae)
+        self.ladder_vae.generative_layers = ladder_vae.generative_layers
+
         self.z_dims = z_dims
         self.do_random_foveation = do_random_foveation
+        self.do_lateral_connections = do_lateral_connections
 
         self.top_z_predictor = VisionTransformer(
             input_dim=z_dims[-1] + 2,  # 2 for concatenated next position
@@ -336,6 +346,7 @@ class NextPatchPredictor(nn.Module):
     def forward(
         self,
         patch_step_zs: List[List[torch.Tensor]],
+        curr_patch_ladder_outputs: List[torch.Tensor],
         forced_next_location: torch.Tensor = None,
         randomize_next_location: bool = False,
     ):
@@ -359,7 +370,9 @@ class NextPatchPredictor(nn.Module):
         else:
             next_pos, next_pos_mu, next_pos_std = self.pred_next_location(patch_step_zs)
 
-        next_patch_gen_dict = self.generate_next_patch_zs(patch_step_zs, next_pos)
+        next_patch_gen_dict = self.generate_next_patch_zs(
+            patch_step_zs, next_pos, curr_patch_ladder_outputs=curr_patch_ladder_outputs
+        )
 
         return dict(
             generation=next_patch_gen_dict,
@@ -389,7 +402,10 @@ class NextPatchPredictor(nn.Module):
         )
 
     def generate_next_patch_zs(
-        self, patch_step_zs: List[List[torch.Tensor]], next_loc: torch.Tensor
+        self,
+        patch_step_zs: List[List[torch.Tensor]],
+        next_loc: torch.Tensor,
+        curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
     ):
         n_steps = len(patch_step_zs)
         # n_levels = len(patch_step_zs[0])
@@ -421,9 +437,17 @@ class NextPatchPredictor(nn.Module):
 
         # next_top_z = reparam_sample(next_top_z_mu, next_top_z_logstd)
 
-        next_patch_gen_dict = self.ladder_vae.generate(
-            top_gen_prior_mu_std=(next_top_z_mu, next_top_z_std)
-        )
+        if self.do_lateral_connections and curr_patch_ladder_outputs is not None:
+            # run inference from ladder outputs, combine with top-down z prediction
+            next_patch_gen_dict = self.ladder_vae(
+                curr_patch_ladder_outputs,
+                top_gen_prior_mu_std=(next_top_z_mu, next_top_z_std),
+            )
+        else:
+            # just do top-down generation
+            next_patch_gen_dict = self.ladder_vae.generate(
+                top_gen_prior_mu_std=(next_top_z_mu, next_top_z_std),
+            )
 
         return next_patch_gen_dict
 

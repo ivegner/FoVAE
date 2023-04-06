@@ -35,7 +35,7 @@ class FoVAE(pl.LightningModule):
         patch_dim=6,
         patch_channels=3,
         patch_ring_scaling_factor=2.0,
-        patch_max_ring_radius=None, # None defaults to half of image
+        patch_max_ring_radius=None,  # None defaults to half of image
         num_steps: int = 1,
         ladder_dims: List[int] = [25],
         z_dims: List[int] = [10],
@@ -66,6 +66,7 @@ class FoVAE(pl.LightningModule):
         do_image_reconstruction=True,
         do_next_patch_prediction=True,
         reconstruct_fovea_only=False,
+        do_lateral_connections=True,
         image_reconstruction_frac=1.0,
     ):
         super().__init__()
@@ -111,6 +112,7 @@ class FoVAE(pl.LightningModule):
             num_heads=npp_num_heads,
             num_layers=npp_num_layers,
             do_random_foveation=do_random_foveation,
+            do_lateral_connections=do_lateral_connections,
         )
         # self.patch_noise_std = nn.Parameter(torch.ones(input_dim), requires_grad=True)
         # self.patch_noise_std = nn.Parameter(torch.tensor([np.sqrt(1/12)]), requires_grad=True)
@@ -152,21 +154,20 @@ class FoVAE(pl.LightningModule):
 
         # image: (b, c, image_dim[0], image_dim[1])
         # TODO: sparsify
-        self.default_gaussian_filter_params = (
-            fov_utils.get_default_gaussian_foveation_filter_params(
-                image_dim=(image_dim, image_dim),
-                fovea_radius=fovea_radius,
-                image_out_dim=patch_dim,
-                # in pyramidal case, pixel ring i averages ring_scaling_factor^i pixels
-                ring_sigma_scaling_factor=patch_ring_scaling_factor,
-                max_ring_radius=patch_max_ring_radius,
-            )
+        self.default_gaussian_filter_params = fov_utils.get_default_gaussian_foveation_filter_params(
+            image_dim=(image_dim, image_dim),
+            fovea_radius=fovea_radius,
+            image_out_dim=patch_dim,
+            # in pyramidal case, pixel ring i averages ring_scaling_factor^i pixels
+            ring_sigma_scaling_factor=patch_ring_scaling_factor,
+            max_ring_radius=patch_max_ring_radius,
         )
         self.do_random_foveation = do_random_foveation
         self.do_image_reconstruction = do_image_reconstruction
         self.do_next_patch_prediction = do_next_patch_prediction
         self.reconstruct_fovea_only = reconstruct_fovea_only
         self.image_reconstruction_fraction = image_reconstruction_frac
+        self.do_lateral_connections = do_lateral_connections
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -245,7 +246,11 @@ class FoVAE(pl.LightningModule):
 
             if self.do_next_patch_prediction:
                 next_patch_dict = self._gen_next_patch(
-                    real_patch_zs, randomize_next_location=self.do_random_foveation
+                    real_patch_zs,
+                    curr_patch_ladder_outputs=curr_patch_dict["ladder_outputs"]
+                    if self.do_lateral_connections
+                    else None,
+                    randomize_next_location=self.do_random_foveation,
                 )
                 # next_patch_dict:
                 #   generation:
@@ -563,6 +568,7 @@ class FoVAE(pl.LightningModule):
 
         for i, position in enumerate(sampled_positions):
             position = position.to(self.device)
+            # TODO: consider passing mu stds from prev patch?
             gen_dict = self._gen_next_patch(gen_zs, forced_next_location=position)
             gen_patch = gen_dict["generation"]["sample_zs"][0]
             # gen_mu, gen_std = gen_dict["generation"]["mu_stds_gen"][0]
@@ -706,21 +712,25 @@ class FoVAE(pl.LightningModule):
     def _process_patch(self, x: torch.Tensor):
         ladder_outputs = self.ladder(x)
         patch_vae_dict = self.ladder_vae(ladder_outputs)
+        patch_vae_dict["ladder_outputs"] = ladder_outputs
         return patch_vae_dict
 
     def _gen_next_patch(
         self,
         prev_zs: List[List[torch.Tensor]],
+        curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
         forced_next_location: Optional[torch.Tensor] = None,
         randomize_next_location: bool = False,
     ):
         # prev_zs: list(n_steps_so_far) of lists
         #              (n_levels from lowest to highest) of tensors (b, dim)
+        # curr_patch_ladder_outputs: list(n_levels from lowest to highest) of tensors (b, d)
         # next_patch_pos: Tensor (b, 2)
         # highest-level z is the last element of the list
 
         return self.next_patch_predictor(
             prev_zs,
+            curr_patch_ladder_outputs=curr_patch_ladder_outputs,
             forced_next_location=forced_next_location,
             randomize_next_location=randomize_next_location,
         )
