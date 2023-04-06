@@ -1150,7 +1150,7 @@ class FoVAE(pl.LightningModule):
                 "Absolute Latent Traversal",
                 [
                     torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[-1]
+                        torch.concat(images_by_row_and_interp), nrow=images_by_row_and_interp[0].size(0)
                     )
                 ],
             )
@@ -1163,7 +1163,7 @@ class FoVAE(pl.LightningModule):
                 "Latent Traversal Around Z",
                 [
                     torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp), nrow=self.z_dims[-1]
+                        torch.concat(images_by_row_and_interp), nrow=images_by_row_and_interp[0].size(0)
                     ),
                 ],
             )
