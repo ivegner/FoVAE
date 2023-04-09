@@ -313,6 +313,7 @@ class NextPatchPredictor(nn.Module):
         do_random_foveation: bool = False,
         do_lateral_connections: bool = True,
         do_sigmoid_next_location: bool = False,
+        do_flag_last_step: bool = False,
     ):
         super().__init__()
 
@@ -333,6 +334,7 @@ class NextPatchPredictor(nn.Module):
             num_heads=num_heads,
             num_layers=num_layers,
             dropout=0,
+            do_flag_last_step=do_flag_last_step,
         )
 
         self.next_location_predictor = VisionTransformer(
@@ -343,6 +345,7 @@ class NextPatchPredictor(nn.Module):
             num_heads=num_heads,
             num_layers=num_layers,
             dropout=0,
+            do_flag_last_step=do_flag_last_step
         )
 
         self.loc_std_min = 0.01

@@ -42,4 +42,5 @@ model:
   do_lateral_connections: true
   do_sigmoid_next_location: false
   npp_do_mask_to_last_step: false
+  npp_do_flag_last_step: false
   image_reconstruction_frac: 0.1

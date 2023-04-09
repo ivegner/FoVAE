@@ -70,6 +70,7 @@ class FoVAE(pl.LightningModule):
         do_lateral_connections=True,
         do_sigmoid_next_location=False,
         npp_do_mask_to_last_step=False,
+        npp_do_flag_last_step=False,
         image_reconstruction_frac=1.0,
     ):
         super().__init__()
@@ -117,6 +118,7 @@ class FoVAE(pl.LightningModule):
             do_random_foveation=do_random_foveation,
             do_lateral_connections=do_lateral_connections,
             do_sigmoid_next_location=do_sigmoid_next_location,
+            do_flag_last_step=npp_do_flag_last_step,
         )
         # self.patch_noise_std = nn.Parameter(torch.ones(input_dim), requires_grad=True)
         # self.patch_noise_std = nn.Parameter(torch.tensor([np.sqrt(1/12)]), requires_grad=True)

@@ -48,7 +48,7 @@ class VisionTransformer(nn.Module):
         num_layers,
         # out_dim,
         # patch_dim,
-        # num_patches,
+        do_flag_last_step: bool = False,
         dropout=0.0,
     ):
         """
@@ -60,6 +60,7 @@ class VisionTransformer(nn.Module):
                          within the Transformer
             num_heads - Number of heads to use in the Multi-Head Attention block
             num_layers - Number of layers to use in the Transformer
+            do_flag_last_step - Whether to apply a special embedding to the last step
             dropout - Amount of dropout to apply in the feed-forward network and
                       on the input encoding
         """
@@ -80,9 +81,12 @@ class VisionTransformer(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
+        self.do_flag_last_step = do_flag_last_step
         # Parameters/Embeddings
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
-        # self.pos_embedding = nn.Parameter(torch.randn(1, 1 + num_patches, embed_dim))
+        # self.pos_embedding = nn.Parameter(torch.randn(1, 1 + max_num_patches, embed_dim))
+        self.last_step_embedding = nn.Parameter(torch.randn(embed_dim))
+
 
     def forward(self, patches: torch.Tensor, mask: torch.Tensor = None):
         # Preprocess input
@@ -102,7 +106,10 @@ class VisionTransformer(nn.Module):
         # Add CLS token
         cls_token = self.cls_token.repeat(B, 1, 1)
         x = torch.cat([cls_token, x], dim=1)
-        # # x = x + self.pos_embedding[:, : T + 1]
+        # x = x + self.pos_embedding[:, : T + 1]
+
+        if self.do_flag_last_step:
+            x[:, -1] = x[:, -1] + self.last_step_embedding
 
         # # Apply Transformer
         x = self.dropout(x)
