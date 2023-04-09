@@ -170,7 +170,9 @@ class LadderVAE(nn.Module):
             mu_stds_inf.append((mu, std))
 
         # generative
-        gen = self.generate(inference_mu_stds=mu_stds_inf, top_gen_prior_mu_std=top_gen_prior_mu_std)
+        gen = self.generate(
+            inference_mu_stds=mu_stds_inf, top_gen_prior_mu_std=top_gen_prior_mu_std
+        )
 
         return dict(
             mu_stds_inference=mu_stds_inf,  # len(n_vae_layers)
@@ -351,15 +353,22 @@ class NextPatchPredictor(nn.Module):
         curr_patch_ladder_outputs: List[torch.Tensor],
         forced_next_location: torch.Tensor = None,
         randomize_next_location: bool = False,
+        mask_to_last_step: bool = False,
     ):
         # patch_step_zs: n_steps_so_far x (n_levels from low to high) x (b, dim)
         # highest-level z is the last element of the list
 
         n_steps = len(patch_step_zs)
-        # n_levels = len(patch_step_zs[0])
-        top_zs = [patch_step_zs[i][-1] for i in range(n_steps)]
-        b = top_zs[0].size(0)
-        device = top_zs[0].device
+        n_levels = len(patch_step_zs[0])
+        # top_zs = [patch_step_zs[i][-1] for i in range(n_steps)]
+        b = patch_step_zs[0][0].size(0)
+        device = patch_step_zs[0][0].device
+
+        if mask_to_last_step:
+            mask = torch.zeros(b, n_steps, device=device)
+            mask[:, -1] = 1
+        else:
+            mask = None
 
         if forced_next_location is not None:
             next_pos, next_pos_mu, next_pos_std = forced_next_location, None, None
@@ -370,10 +379,15 @@ class NextPatchPredictor(nn.Module):
                 None,
             )
         else:
-            next_pos, next_pos_mu, next_pos_std = self.pred_next_location(patch_step_zs)
+            next_pos, next_pos_mu, next_pos_std = self.pred_next_location(
+                patch_step_zs, mask=mask
+            )
 
         next_patch_gen_dict = self.generate_next_patch_zs(
-            patch_step_zs, next_pos, curr_patch_ladder_outputs=curr_patch_ladder_outputs
+            patch_step_zs,
+            next_pos,
+            curr_patch_ladder_outputs=curr_patch_ladder_outputs,
+            mask=mask,
         )
 
         return dict(
@@ -385,11 +399,11 @@ class NextPatchPredictor(nn.Module):
             ),
         )
 
-    def pred_next_location(self, patch_step_zs: List[List[torch.Tensor]]):
+    def pred_next_location(self, patch_step_zs: List[List[torch.Tensor]], mask=None):
         Z_LEVEL_TO_PRED_LOC = -1  # TODO: make this a param, and maybe multiple levels
 
         prev_top_zs = self._get_zs_from_level(patch_step_zs, Z_LEVEL_TO_PRED_LOC)
-        pred = self.next_location_predictor(prev_top_zs)
+        pred = self.next_location_predictor(prev_top_zs, mask=mask)
         next_loc_mu, next_loc_raw_logstd = pred[:, :2], pred[:, 2:]
 
         # TODO: make params for this
@@ -412,6 +426,7 @@ class NextPatchPredictor(nn.Module):
         patch_step_zs: List[List[torch.Tensor]],
         next_loc: torch.Tensor,
         curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
+        mask = None,
     ):
         n_steps = len(patch_step_zs)
         # n_levels = len(patch_step_zs[0])
@@ -427,7 +442,7 @@ class NextPatchPredictor(nn.Module):
             dim=2,
         )
 
-        next_top_z_pred = self.top_z_predictor(prev_top_zs_with_pos)
+        next_top_z_pred = self.top_z_predictor(prev_top_zs_with_pos, mask=mask)
         next_top_z_mu, next_top_z_raw_logstd = (
             next_top_z_pred[:, : self.z_dims[-1]],
             next_top_z_pred[:, self.z_dims[-1] :],

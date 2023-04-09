@@ -27,6 +27,7 @@ from utils.misc import recursive_to, recursive_detach
 # from memory_profiler import profile
 plt.ioff()
 
+
 class FoVAE(pl.LightningModule):
     def __init__(
         self,
@@ -68,6 +69,7 @@ class FoVAE(pl.LightningModule):
         reconstruct_fovea_only=False,
         do_lateral_connections=True,
         do_sigmoid_next_location=False,
+        npp_do_mask_to_last_step=False,
         image_reconstruction_frac=1.0,
     ):
         super().__init__()
@@ -170,6 +172,7 @@ class FoVAE(pl.LightningModule):
         self.reconstruct_fovea_only = reconstruct_fovea_only
         self.image_reconstruction_fraction = image_reconstruction_frac
         self.do_lateral_connections = do_lateral_connections
+        self.npp_do_mask_to_last_step = npp_do_mask_to_last_step
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -253,6 +256,7 @@ class FoVAE(pl.LightningModule):
                     if self.do_lateral_connections
                     else None,
                     randomize_next_location=self.do_random_foveation,
+                    mask_to_last_step=self.npp_do_mask_to_last_step,
                 )
                 # next_patch_dict:
                 #   generation:
@@ -571,7 +575,9 @@ class FoVAE(pl.LightningModule):
         for i, position in enumerate(sampled_positions):
             position = position.to(self.device)
             # TODO: consider passing mu stds from prev patch?
-            gen_dict = self._gen_next_patch(gen_zs, forced_next_location=position)
+            gen_dict = self._gen_next_patch(
+                gen_zs, forced_next_location=position, mask_to_last_step=False
+            )
             gen_patch = gen_dict["generation"]["sample_zs"][0]
             # gen_mu, gen_std = gen_dict["generation"]["mu_stds_gen"][0]
             # gen_zs.append(gen_dict["generation"]["sample_zs"])
@@ -723,6 +729,7 @@ class FoVAE(pl.LightningModule):
         curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
         forced_next_location: Optional[torch.Tensor] = None,
         randomize_next_location: bool = False,
+        mask_to_last_step: bool = False,
     ):
         # prev_zs: list(n_steps_so_far) of lists
         #              (n_levels from lowest to highest) of tensors (b, dim)
@@ -735,6 +742,7 @@ class FoVAE(pl.LightningModule):
             curr_patch_ladder_outputs=curr_patch_ladder_outputs,
             forced_next_location=forced_next_location,
             randomize_next_location=randomize_next_location,
+            mask_to_last_step=mask_to_last_step,
         )
 
     def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
@@ -1152,7 +1160,8 @@ class FoVAE(pl.LightningModule):
                 "Absolute Latent Traversal",
                 [
                     torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp), nrow=images_by_row_and_interp[0].size(0)
+                        torch.concat(images_by_row_and_interp),
+                        nrow=images_by_row_and_interp[0].size(0),
                     )
                 ],
             )
@@ -1165,7 +1174,8 @@ class FoVAE(pl.LightningModule):
                 "Latent Traversal Around Z",
                 [
                     torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp), nrow=images_by_row_and_interp[0].size(0)
+                        torch.concat(images_by_row_and_interp),
+                        nrow=images_by_row_and_interp[0].size(0),
                     ),
                 ],
             )

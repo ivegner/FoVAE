@@ -84,13 +84,20 @@ class VisionTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         # self.pos_embedding = nn.Parameter(torch.randn(1, 1 + num_patches, embed_dim))
 
-    def forward(self, patches: torch.Tensor):
+    def forward(self, patches: torch.Tensor, mask: torch.Tensor = None):
         # Preprocess input
         B, T, dim = patches.shape
         assert dim == self.input_dim, f"Expected input dimension {self.input_dim}, got {dim}"
+        if mask is not None:
+            assert (
+                mask.shape == (B, T)
+            ), f"Expected mask shape {(B, T)}, got {mask.shape}"
+            masked_patches = patches * mask[:, :, None]
+        else:
+            masked_patches = patches
 
         # reshapes workaround for https://github.com/pytorch/pytorch/issues/95883
-        x = self.input_layer(patches.reshape(B * T, dim)).reshape(B, T, -1)
+        x = self.input_layer(masked_patches.reshape(B * T, dim)).reshape(B, T, -1)
 
         # Add CLS token
         cls_token = self.cls_token.repeat(B, 1, 1)
