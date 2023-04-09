@@ -40,4 +40,5 @@ model:
   do_next_patch_prediction: true
   reconstruct_fovea_only: false
   do_lateral_connections: true
+  do_sigmoid_next_location: false
   image_reconstruction_frac: 0.1

@@ -33,6 +33,7 @@ class ImageDataModule(LightningDataModule):
                 transform=transforms.Compose(
                     [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
                 ),
+                download=True
             )
         elif dataset == "imagenet":
             self.dataset_train = torchvision.datasets.ImageNet(

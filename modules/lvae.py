@@ -310,6 +310,7 @@ class NextPatchPredictor(nn.Module):
         num_layers: int = 3,
         do_random_foveation: bool = False,
         do_lateral_connections: bool = True,
+        do_sigmoid_next_location: bool = False,
     ):
         super().__init__()
 
@@ -320,6 +321,7 @@ class NextPatchPredictor(nn.Module):
         self.z_dims = z_dims
         self.do_random_foveation = do_random_foveation
         self.do_lateral_connections = do_lateral_connections
+        self.do_sigmoid_next_location = do_sigmoid_next_location
 
         self.top_z_predictor = VisionTransformer(
             input_dim=z_dims[-1] + 2,  # 2 for concatenated next position
@@ -395,8 +397,12 @@ class NextPatchPredictor(nn.Module):
 
         next_loc = reparam_sample(next_loc_mu, next_loc_std)
 
+        if self.do_sigmoid_next_location:
+            next_loc = nn.functional.sigmoid(next_loc) * 2 - 1
+        else:
+            next_loc = torch.clamp(next_loc, -1, 1)
         return (
-            torch.clamp(next_loc, -1, 1),
+            next_loc,
             next_loc_mu,
             next_loc_std,
         )
