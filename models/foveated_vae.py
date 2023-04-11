@@ -108,8 +108,16 @@ class FoVAE(pl.LightningModule):
         self.ladder_vae = LadderVAE(
             input_dim, ladder_dims, z_dims, lvae_inf_hidden_dims, lvae_gen_hidden_dims
         )
+
+        # make laddervae to use for next patch prediction
+        # instead of going from ladder, use current patch zs as ladder outputs
+        # but reuse generative layers from ladder vae
+        npp_ladder_vae = LadderVAE(
+            input_dim, z_dims, z_dims, lvae_inf_hidden_dims, lvae_gen_hidden_dims
+        )
+        npp_ladder_vae.generative_layers = self.ladder_vae.generative_layers
         self.next_patch_predictor = NextPatchPredictor(
-            ladder_vae=self.ladder_vae,
+            ladder_vae=npp_ladder_vae,
             z_dims=z_dims,
             embed_dim=npp_embed_dim,
             hidden_dim=npp_hidden_dim,

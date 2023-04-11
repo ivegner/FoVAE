@@ -317,10 +317,7 @@ class NextPatchPredictor(nn.Module):
     ):
         super().__init__()
 
-        # reuse generative layers from ladder vae
-        self.ladder_vae = deepcopy(ladder_vae)
-        self.ladder_vae.generative_layers = ladder_vae.generative_layers
-
+        self.ladder_vae = ladder_vae
         self.z_dims = z_dims
         self.do_random_foveation = do_random_foveation
         self.do_lateral_connections = do_lateral_connections
@@ -389,7 +386,7 @@ class NextPatchPredictor(nn.Module):
         next_patch_gen_dict = self.generate_next_patch_zs(
             patch_step_zs,
             next_pos,
-            curr_patch_ladder_outputs=curr_patch_ladder_outputs,
+            # curr_patch_ladder_outputs=curr_patch_ladder_outputs,
             mask=mask,
         )
 
@@ -428,11 +425,11 @@ class NextPatchPredictor(nn.Module):
         self,
         patch_step_zs: List[List[torch.Tensor]],
         next_loc: torch.Tensor,
-        curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
+        # curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
         mask = None,
     ):
         n_steps = len(patch_step_zs)
-        # n_levels = len(patch_step_zs[0])
+        n_levels = len(patch_step_zs[0])
         b = patch_step_zs[0][0].size(0)
         assert next_loc.size() == torch.Size([b, 2]), "next_loc should be (b, 2)"
 
@@ -461,10 +458,13 @@ class NextPatchPredictor(nn.Module):
 
         # next_top_z = reparam_sample(next_top_z_mu, next_top_z_logstd)
 
-        if self.do_lateral_connections and curr_patch_ladder_outputs is not None:
+        if self.do_lateral_connections:# and curr_patch_ladder_outputs is not None:
             # run inference from ladder outputs, combine with top-down z prediction
+            # TODO: don't use ladder outputs but instead use the z's from the previous patch
+            # as if they were the ladder outputs
             next_patch_gen_dict = self.ladder_vae(
-                curr_patch_ladder_outputs,
+                (patch_step_zs[-1][1:], patch_step_zs[-1][0]), # last step of previous patch as ladder outputs
+                # curr_patch_ladder_outputs,
                 top_gen_prior_mu_std=(next_top_z_mu, next_top_z_std),
             )
         else:
