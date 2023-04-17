@@ -17,7 +17,7 @@ class MyLightningCLI(LightningCLI):
         parser.add_argument(
             "--resume_run_id", default="", type=str, help="W&B run ID to resume from"
         )
-        parser.link_arguments("resume_run_id", "trainer.logger.init_args.resume", compute_fn=lambda x: "must" if x else "never")
+        # parser.link_arguments("resume_run_id", "trainer.logger.init_args.resume", compute_fn=lambda x: "must" if x else "never")
         # parser.link_arguments("resume_run_id", "trainer.logger.init_args.id")
 
     def before_instantiate_classes(self):
@@ -30,16 +30,19 @@ class MyLightningCLI(LightningCLI):
             return f"checkpoints/{run_id}"
 
         run_id = None
+        if c.resume_run_id and subcommand == "fit":
+            run_id = c.resume_run_id
+            c.trainer.logger.init_args.resume = "must"
+        else:
+            run_id = wandb.util.generate_id()
+            c.trainer.logger.init_args.resume = "never"
 
         if c.resume_run_id:
-            run_id = c.resume_run_id
             api = wandb.Api()
-            artifact = api.artifact(f'{c.trainer.logger.init_args.project}/model-{run_id}:latest', type="model")
+            artifact = api.artifact(f'{c.trainer.logger.init_args.project}/model-{c.resume_run_id}:latest', type="model")
             # artifact_dir = artifact.download(make_checkpoint_dir(c.resume_run_id))
             artifact_dir = artifact.download()
             c.ckpt_path=str(Path(artifact_dir) / "model.ckpt")
-        else:
-            run_id = wandb.util.generate_id()
 
         c.trainer.logger.init_args.id = run_id
         for callback in c.trainer.callbacks:
@@ -52,6 +55,13 @@ def cli_main():
         ImageDataModule,
         parser_kwargs={
             "fit": {
+                "default_config_files": [
+                    f"{default_config_dir}/trainer.yaml",
+                    f"{default_config_dir}/model_mnist.yaml",
+                    f"{default_config_dir}/data_mnist.yaml",
+                ]
+            },
+            "validate": {
                 "default_config_files": [
                     f"{default_config_dir}/trainer.yaml",
                     f"{default_config_dir}/model_mnist.yaml",

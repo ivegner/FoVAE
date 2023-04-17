@@ -9,45 +9,52 @@ import numpy as np
 class ImageDataModule(LightningDataModule):
     def __init__(
         self,
-        dataset: Literal["mnist", "cifar10", "imagenet"] = "cifar10",
+        dataset: Literal["mnist", "omniglot", "cifar10", "imagenet"] = "cifar10",
         data_dir: str = "data",
         batch_size: int = 16,
         num_workers: int = 4,
         persistent_workers: bool = True,
+        resize: int = None,
     ) -> None:
         super().__init__()
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.persistent_workers = persistent_workers
+        _transforms = [transforms.ToTensor()]
+        if resize:
+            _transforms.insert(0, transforms.Resize(resize, antialias=True))
         if dataset == "mnist":
+            _transforms.append(transforms.Normalize(0.5, 0.5))
             self.dataset_full = torchvision.datasets.MNIST(
                 root=data_dir,
-                transform=transforms.Compose(
-                    [transforms.ToTensor(), transforms.Normalize(0.5, 0.5)]
-                ),
+                transform=transforms.Compose(_transforms),
+                download=True,
+            )
+        if dataset == "omniglot":
+            _transforms.insert(0, transforms.functional.invert)
+            _transforms.append(transforms.Normalize(0.5, 0.5))
+            self.dataset_full = torchvision.datasets.Omniglot(
+                root=data_dir,
+                transform=transforms.Compose(_transforms),
                 download=True,
             )
         elif dataset == "cifar10":
+            _transforms.append(transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)))
             self.dataset_full = torchvision.datasets.CIFAR10(
                 root=data_dir,
-                transform=transforms.Compose(
-                    [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-                ),
-                download=True
+                transform=transforms.Compose(_transforms),
+                download=True,
             )
         elif dataset == "imagenet":
+            _transforms.append(transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)))
             self.dataset_train = torchvision.datasets.ImageNet(
                 root=data_dir,
-                transform=transforms.Compose(
-                    [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-                ),
+                transform=transforms.Compose(_transforms),
                 split="train",
             )
             self.dataset_val = torchvision.datasets.ImageNet(
                 root=data_dir,
-                transform=transforms.Compose(
-                    [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-                ),
+                transform=transforms.Compose(_transforms),
                 split="val",
             )
 
