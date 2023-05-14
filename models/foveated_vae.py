@@ -212,7 +212,7 @@ class FoVAE(pl.LightningModule):
             [],
         )
 
-        def memoized_patch_getter(x_full):
+        def memoized_patch_getter(x_full, return_full_periphery=False):
             _fov_memo = None
 
             def get_patch_from_pos(pos):
@@ -221,7 +221,10 @@ class FoVAE(pl.LightningModule):
                 patch, _fov_memo = self._foveate_to_loc(x_full, pos, _fov_memo=_fov_memo)
                 patch = patch.reshape(b, -1)
                 assert patch.shape == (b, self.num_channels * self.patch_dim * self.patch_dim)
-                return patch
+                if return_full_periphery:
+                    return patch, _fov_memo["pyramid"][-1]
+                else:
+                    return patch
 
             return get_patch_from_pos
 
@@ -965,6 +968,23 @@ class FoVAE(pl.LightningModule):
             == torch.Size([self.num_channels * self.patch_dim * self.patch_dim])
         )
         assert step_sample_zs[0][1][0].size() == torch.Size([self.z_dims[0]])
+
+        # self.logger.log_image(
+        #     "Real Images",
+        #     [
+        #         torchvision.utils.make_grid(
+        #             remove_pos_channels_from_batch(
+        #                 patches[0][:4].view(
+        #                     -1, self.num_channels, self.patch_dim, self.patch_dim
+        #                 )
+        #                 / 2
+        #                 + 0.5
+        #             ).cpu(),
+        #             nrow=8,
+        #             padding=1,
+        #         )
+        #     ],
+        # )
 
         if batch_idx == 0:
             N_TO_PLOT = 4

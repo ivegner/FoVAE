@@ -320,10 +320,10 @@ def apply_mean_foveation_pyramid(image: torch.Tensor, foveation_params: dict, me
         )
         memo = {"image": image, "scale_factors": scale_factors, "pyramid": pyramid}
 
-    def _assign_indices(foveated_image, p, target_indices, batch_idx, channel_idx, x_idx, y_idx):
-        foveated_image[:, :, target_indices[:, 1], target_indices[:, 0]] = p[
-            batch_idx, channel_idx, x_idx, y_idx
-        ]
+    # def _assign_indices(foveated_image, p, target_indices, batch_idx, channel_idx, x_idx, y_idx):
+    #     foveated_image[:, :, target_indices[:, 1], target_indices[:, 0]] = p[
+    #         batch_idx, channel_idx, x_idx, y_idx
+    #     ]
 
     eps = 1e-6
 
