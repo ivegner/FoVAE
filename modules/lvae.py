@@ -310,7 +310,6 @@ class NextPatchPredictor(nn.Module):
         hidden_dim: int = 512,
         num_heads: int = 1,
         num_layers: int = 3,
-        do_random_foveation: bool = False,
         do_lateral_connections: bool = True,
         do_sigmoid_next_location: bool = False,
         do_flag_last_step: bool = False,
@@ -322,7 +321,6 @@ class NextPatchPredictor(nn.Module):
         self.ladder_vae.generative_layers = ladder_vae.generative_layers
 
         self.z_dims = z_dims
-        self.do_random_foveation = do_random_foveation
         self.do_lateral_connections = do_lateral_connections
         self.do_sigmoid_next_location = do_sigmoid_next_location
 
@@ -345,7 +343,7 @@ class NextPatchPredictor(nn.Module):
             num_heads=num_heads,
             num_layers=num_layers,
             dropout=0,
-            do_flag_last_step=do_flag_last_step
+            do_flag_last_step=do_flag_last_step,
         )
 
         self.loc_std_min = 0.01
@@ -355,7 +353,7 @@ class NextPatchPredictor(nn.Module):
         patch_step_zs: List[List[torch.Tensor]],
         curr_patch_ladder_outputs: List[torch.Tensor],
         forced_next_location: torch.Tensor = None,
-        randomize_next_location: bool = False,
+        randomize_next_location: torch.Tensor = None,
         mask_to_last_step: bool = False,
     ):
         # patch_step_zs: n_steps_so_far x (n_levels from low to high) x (b, dim)
@@ -375,16 +373,13 @@ class NextPatchPredictor(nn.Module):
 
         if forced_next_location is not None:
             next_pos, next_pos_mu, next_pos_std = forced_next_location, None, None
-        elif self.do_random_foveation or randomize_next_location:
-            next_pos, next_pos_mu, next_pos_std = (
-                self._get_random_foveation_pos(b, device=device),
-                None,
-                None,
-            )
         else:
-            next_pos, next_pos_mu, next_pos_std = self.pred_next_location(
-                patch_step_zs, mask=mask
-            )
+            next_pos, next_pos_mu, next_pos_std = self.pred_next_location(patch_step_zs, mask=mask)
+
+        # randomize next location for those that are masked to true in randomize_next_location
+        if randomize_next_location is not None:
+            next_pos_rand = self._get_random_foveation_pos(b, device=device)
+            next_pos = torch.where(randomize_next_location[:, None], next_pos_rand, next_pos)
 
         next_patch_gen_dict = self.generate_next_patch_zs(
             patch_step_zs,
@@ -429,7 +424,7 @@ class NextPatchPredictor(nn.Module):
         patch_step_zs: List[List[torch.Tensor]],
         next_loc: torch.Tensor,
         curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
-        mask = None,
+        mask=None,
     ):
         n_steps = len(patch_step_zs)
         # n_levels = len(patch_step_zs[0])

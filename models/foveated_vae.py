@@ -63,7 +63,7 @@ class FoVAE(pl.LightningModule):
         # n_spectral_iter=1,
         grad_skip_threshold=-1,
         # do_use_beta_norm=True,
-        do_random_foveation=False,
+        frac_random_foveation=0.0,
         do_image_reconstruction=True,
         do_next_patch_prediction=True,
         reconstruct_fovea_only=False,
@@ -71,6 +71,7 @@ class FoVAE(pl.LightningModule):
         do_sigmoid_next_location=False,
         npp_do_mask_to_last_step=False,
         npp_do_flag_last_step=False,
+        npp_do_curiosity=False,
         image_reconstruction_frac=1.0,
     ):
         super().__init__()
@@ -115,7 +116,6 @@ class FoVAE(pl.LightningModule):
             hidden_dim=npp_hidden_dim,
             num_heads=npp_num_heads,
             num_layers=npp_num_layers,
-            do_random_foveation=do_random_foveation,
             do_lateral_connections=do_lateral_connections,
             do_sigmoid_next_location=do_sigmoid_next_location,
             do_flag_last_step=npp_do_flag_last_step,
@@ -168,13 +168,14 @@ class FoVAE(pl.LightningModule):
             ring_sigma_scaling_factor=patch_ring_scaling_factor,
             max_ring_radius=patch_max_ring_radius,
         )
-        self.do_random_foveation = do_random_foveation
+        self.frac_random_foveation = frac_random_foveation
         self.do_image_reconstruction = do_image_reconstruction
         self.do_next_patch_prediction = do_next_patch_prediction
         self.reconstruct_fovea_only = reconstruct_fovea_only
         self.image_reconstruction_fraction = image_reconstruction_frac
         self.do_lateral_connections = do_lateral_connections
         self.npp_do_mask_to_last_step = npp_do_mask_to_last_step
+        self.npp_do_curiosity = npp_do_curiosity
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -254,13 +255,17 @@ class FoVAE(pl.LightningModule):
             real_patch_zs.append(curr_patch_dict["sample_zs"])
             real_patch_dicts.append(curr_patch_dict)
 
+            do_random_foveation = (
+                torch.rand(b, device=x.device) < self.frac_random_foveation
+            )
+
             if self.do_next_patch_prediction:
                 next_patch_dict = self._gen_next_patch(
                     real_patch_zs,
                     curr_patch_ladder_outputs=curr_patch_dict["ladder_outputs"]
                     if self.do_lateral_connections
                     else None,
-                    randomize_next_location=self.do_random_foveation,
+                    randomize_next_location=do_random_foveation,
                     mask_to_last_step=self.npp_do_mask_to_last_step,
                 )
                 # next_patch_dict:
@@ -277,10 +282,10 @@ class FoVAE(pl.LightningModule):
                 gen_patch_dicts.append(next_patch_dict)
 
                 next_pos = next_patch_dict["position"]["next_pos"]
-            elif self.do_random_foveation:
+            elif self.frac_random_foveation == 1.0:
                 next_pos = self._get_random_foveation_pos(batch_size=b)
             else:
-                raise ValueError("Must do either next patch prediction or random foveation")
+                raise ValueError("Must do either next patch prediction or frac_random_foveation=1.0")
 
             # foveate to next position
             next_patch = get_patch_from_pos(next_pos)
@@ -310,7 +315,7 @@ class FoVAE(pl.LightningModule):
             # only do kl divergence because
             # reconstruction of next_pos is captured in next_patch_rec_loss
             _next_patch_pos_kl_div = 0.0
-            if not self.do_random_foveation:
+            if self.frac_random_foveation < 1.0:
                 _next_patch_pos_kl_div = self._kl_divergence(
                     mu=next_patch_dict["position"]["next_pos_mu"],
                     std=next_patch_dict["position"]["next_pos_std"],
@@ -733,7 +738,7 @@ class FoVAE(pl.LightningModule):
         prev_zs: List[List[torch.Tensor]],
         curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
         forced_next_location: Optional[torch.Tensor] = None,
-        randomize_next_location: bool = False,
+        randomize_next_location: Optional[torch.Tensor] = None,
         mask_to_last_step: bool = False,
     ):
         # prev_zs: list(n_steps_so_far) of lists
@@ -923,7 +928,7 @@ class FoVAE(pl.LightningModule):
             on_epoch=True,
             on_step=False,
             logger=True,
-            prog_bar=True,
+            # prog_bar=True,
             reduce_fx=torch.sum,
             sync_dist=True,
         )
@@ -1345,7 +1350,7 @@ class FoVAE(pl.LightningModule):
             on_epoch=True,
             on_step=False,
             logger=True,
-            prog_bar=True,
+            # prog_bar=True,
             reduce_fx=torch.sum,
             sync_dist=True,
         )
