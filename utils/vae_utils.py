@@ -122,17 +122,16 @@ def gaussian_kl_divergence(
         # kl = (log_qzx - log_pz)
         kl = torch.distributions.kl_divergence(q, p)
 
-        # kl = _base_gaussian_kl(mu_prior, std_prior, p_logstd, mu, q_std, q_logstd)
-        kl = kl.sum(-1)
+        # kl = kl.sum(-1)
 
     except ValueError as e:
         print(e)
         return torch.nan
 
     if batch_reduce_fn == "mean":
-        kl = kl.mean()
+        kl = kl.mean(dim=0)
     elif batch_reduce_fn == "sum":
-        kl = kl.sum()
+        kl = kl.sum(dim=0)
     elif batch_reduce_fn == "none":
         pass
     else:

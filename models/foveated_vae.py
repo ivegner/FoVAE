@@ -21,7 +21,7 @@ from utils.vae_utils import (
     free_bits_kl,
     reparam_sample,
 )
-from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters, fig_to_nparray
+from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters, fig_to_nparray, plot_layer_kl_history_by_dim
 from utils.misc import recursive_to, recursive_detach
 
 # from memory_profiler import profile
@@ -208,9 +208,9 @@ class FoVAE(pl.LightningModule):
         next_patch_kl_div_total_loss = torch.tensor(0.0, device=x.device)
         image_reconstruction_loss = torch.tensor(0.0, device=x.device)
         curr_patch_kl_divs_by_layer, next_patch_rec_losses_by_layer, next_patch_kl_divs_by_layer = (
-            [],
-            [],
-            [],
+            [None] * (self.num_vae_levels+1),
+            [None] * (self.num_vae_levels+1),
+            [None] * (self.num_vae_levels+1),
         )
 
         def memoized_patch_getter(x_full, return_full_periphery=False):
@@ -304,12 +304,15 @@ class FoVAE(pl.LightningModule):
                 fovea_only=self.reconstruct_fovea_only,
             )
 
-            _curr_patch_kl_divs = []
             for i, (mu, std) in enumerate(curr_patch_dict["mu_stds_gen"]):
-                kl = self._kl_divergence(mu=mu, std=std)  # , bound_with_noise=(i == 0))
+                kl = self._kl_divergence(mu=mu, std=std)
                 if i == 0 and not DO_KL_ON_INPUT_LEVEL:
                     kl = torch.zeros_like(kl)
-                _curr_patch_kl_divs.append(kl)
+
+                if curr_patch_kl_divs_by_layer[i] is None:
+                    curr_patch_kl_divs_by_layer[i] = kl
+                else:
+                    curr_patch_kl_divs_by_layer[i] += kl
 
             # calculate kl divergence between predicted next patch pos and std-normal prior
             # only do kl divergence because
@@ -319,15 +322,13 @@ class FoVAE(pl.LightningModule):
                 _next_patch_pos_kl_div = self._kl_divergence(
                     mu=next_patch_dict["position"]["next_pos_mu"],
                     std=next_patch_dict["position"]["next_pos_std"],
-                )
+                ).sum(-1)
 
             # if any previous predicted patch, calculate loss between
             # current patch and previous predicted patch
-            _next_patch_rec_losses, _next_patch_kl_divs = [], []
             if self.do_next_patch_prediction and len(gen_patch_zs) > 1:
                 # -2 because -1 is the current step, and -2 is the previous step
                 prev_gen_patch_dict = gen_patch_dicts[-2]
-                _next_patch_rec_losses, _next_patch_kl_divs = [], []
                 for i, (mu, std) in enumerate(prev_gen_patch_dict["generation"]["mu_stds_gen"]):
                     if i == 0:
                         # input-level, compare against real patch
@@ -353,15 +354,16 @@ class FoVAE(pl.LightningModule):
                     if i == 0 and not DO_KL_ON_INPUT_LEVEL:
                         level_kl = torch.zeros_like(level_kl)
 
-                    _next_patch_rec_losses.append(level_rec_loss)
-                    _next_patch_kl_divs.append(level_kl)
 
-                next_patch_rec_losses_by_layer.append(torch.stack(_next_patch_rec_losses, dim=0))
-                next_patch_kl_divs_by_layer.append(torch.stack(_next_patch_kl_divs, dim=0))
+                    if next_patch_rec_losses_by_layer[i] is None:
+                        next_patch_rec_losses_by_layer[i] = level_rec_loss
+                        next_patch_kl_divs_by_layer[i] = level_kl
+                    else:
+                        next_patch_rec_losses_by_layer[i] += level_rec_loss
+                        next_patch_kl_divs_by_layer[i] += level_kl
 
             # aggregate losses
             curr_patch_rec_total_loss += _curr_patch_rec_loss
-            curr_patch_kl_divs_by_layer.append(torch.stack(_curr_patch_kl_divs, dim=0))
             next_patch_pos_kl_div_total_loss += _next_patch_pos_kl_div
 
             # check that the next patch's position is close to the position from which
@@ -409,22 +411,19 @@ class FoVAE(pl.LightningModule):
         DO_COMPUTE_NEXT_PATCH_LOSSES = self.do_next_patch_prediction and self.num_steps > 1
         # aggregate losses across steps
         # mean over steps
-        curr_patch_kl_divs_by_layer = torch.stack(curr_patch_kl_divs_by_layer, dim=0).mean(dim=0)
+        curr_patch_kl_divs_by_layer = [g / self.num_steps for g in curr_patch_kl_divs_by_layer]
         if DO_COMPUTE_NEXT_PATCH_LOSSES:
-            next_patch_rec_losses_by_layer = torch.stack(
-                next_patch_rec_losses_by_layer, dim=0
-            ).mean(dim=0)
-            next_patch_kl_divs_by_layer = torch.stack(next_patch_kl_divs_by_layer, dim=0).mean(
-                dim=0
-            )
+            next_patch_rec_losses_by_layer = [g / self.num_steps for g in next_patch_rec_losses_by_layer]
+            next_patch_kl_divs_by_layer = [g / self.num_steps for g in next_patch_kl_divs_by_layer]
 
         curr_patch_rec_total_loss = (
             self.betas["curr_patch_recon"] * curr_patch_rec_total_loss / self.num_steps
         )
-        # sum over layers (already mean over steps)
+        # sum over layers and z_dim (already mean over steps)
+        # TODO: apply free bits to sum of z_dim KLs as opposed to every dim as now?
         curr_patch_kl_div_total_loss = (
             self.betas["curr_patch_kl"]
-            * free_bits_kl(curr_patch_kl_divs_by_layer, self.free_bits_kl).sum()
+            * torch.stack([free_bits_kl(g, self.free_bits_kl).sum(dim=0) for g in curr_patch_kl_divs_by_layer], dim=0).sum()
         )
         next_patch_pos_kl_div_total_loss = self.betas["next_patch_pos_kl"] * free_bits_kl(
             next_patch_pos_kl_div_total_loss / self.num_steps, self.free_bits_kl
@@ -432,11 +431,11 @@ class FoVAE(pl.LightningModule):
         # sum over layers (already mean over steps)
         if DO_COMPUTE_NEXT_PATCH_LOSSES:
             next_patch_rec_total_loss = (
-                self.betas["next_patch_recon"] * next_patch_rec_losses_by_layer.sum()
+                self.betas["next_patch_recon"] * torch.stack(next_patch_rec_losses_by_layer, dim=0).sum()
             )
             next_patch_kl_div_total_loss = (
                 self.betas["next_patch_kl"]
-                * free_bits_kl(next_patch_kl_divs_by_layer, self.free_bits_kl).sum()
+                * torch.stack([free_bits_kl(g, self.free_bits_kl).sum(dim=0) for g in next_patch_kl_divs_by_layer], dim=0).sum()
             )
 
         image_reconstruction_loss = self.betas["image_recon"] * image_reconstruction_loss
@@ -481,9 +480,9 @@ class FoVAE(pl.LightningModule):
                 spectral_norm=spectral_norm,
             ),
             losses_by_layer=dict(
-                curr_patch_kl_divs_by_layer=curr_patch_kl_divs_by_layer,  # n_levels
+                curr_patch_kl_divs_by_layer=curr_patch_kl_divs_by_layer,  # n_levels, z_dim
                 next_patch_rec_losses_by_layer=next_patch_rec_losses_by_layer,  # n_levels
-                next_patch_kl_divs_by_layer=next_patch_kl_divs_by_layer,  # n_levels
+                next_patch_kl_divs_by_layer=next_patch_kl_divs_by_layer,  # n_levels, z_dim
             ),
             step_vars=dict(
                 patches=patches,  # n_steps x (b, n_channels, patch_dim, patch_dim)
@@ -516,17 +515,16 @@ class FoVAE(pl.LightningModule):
             # norm_std_bound_max=1.0 if is_bottom_level else None,
         )
 
-    def _kl_divergence(self, mu, std):
+    def _kl_divergence(self, mu, std, mu_prior=0.0, std_prior=1.0, batch_reduce_fn="mean"):
         if std.size() == torch.Size([1]):
             std = std.expand(mu.size())
 
         return gaussian_kl_divergence(
             mu=mu,
             std=std,
-            batch_reduce_fn="mean",
-            # norm_std_method="bounded" if bound_with_noise else "explin",
-            # norm_std_bound_min=self.patch_noise_std if bound_with_noise else None,
-            # norm_std_bound_max=1.0 if bound_with_noise else None,
+            mu_prior=mu_prior,
+            std_prior=std_prior,
+            batch_reduce_fn=batch_reduce_fn,
         )
 
     def _get_random_foveation_pos(self, batch_size: int):
@@ -945,20 +943,31 @@ class FoVAE(pl.LightningModule):
 
         # plot kl divergences by layer on the same plots
         curr_patch_kl_divs_by_layer = forward_out["losses_by_layer"]["curr_patch_kl_divs_by_layer"]
+        if not hasattr(self, "_epoch_curr_patch_kl_history"):
+            self._epoch_curr_patch_kl_history = [list() for _ in curr_patch_kl_divs_by_layer]
+        for i, v in enumerate(curr_patch_kl_divs_by_layer):
+            self._epoch_curr_patch_kl_history[i].append(v.detach().cpu().numpy())
+
         _curr_kl_divs = {
-            f"val/curr_patch_kl_l{i}": v.detach().item()
+            f"val/curr_patch_kl_l{i}": v.detach().sum().item()
             for i, v in enumerate(curr_patch_kl_divs_by_layer)
         }
         self.log_dict(_curr_kl_divs)
+
         if self.do_next_patch_prediction:
             next_patch_kl_divs_by_layer = forward_out["losses_by_layer"][
                 "next_patch_kl_divs_by_layer"
             ]
             _next_kl_divs = {
-                f"val/next_patch_kl_l{i}": v.detach().item()
+                f"val/next_patch_kl_l{i}": v.detach().sum().item()
                 for i, v in enumerate(next_patch_kl_divs_by_layer)
             }
             self.log_dict(_next_kl_divs)
+
+            if not hasattr(self, "_epoch_npp_kl_history"):
+                self._epoch_npp_kl_history = [list() for _ in next_patch_kl_divs_by_layer]
+            for i, v in enumerate(next_patch_kl_divs_by_layer):
+                self._epoch_npp_kl_history[i].append(v.detach().cpu().numpy())
 
         step_sample_zs = forward_out["step_vars"]["real_patch_zs"]
         # step_z_recons = forward_out["step_vars"]["z_recons"]
@@ -1251,6 +1260,30 @@ class FoVAE(pl.LightningModule):
         # for obj in gc.get_objects():
         #     _recursive_gc_log_tensors(obj)
         return total_loss
+
+    def on_validation_epoch_end(self):
+        if not hasattr(self, "curr_patch_kl_history"):
+            self.curr_patch_kl_history = [list() for _ in self._epoch_curr_patch_kl_history]
+            self.val_epochs = []
+            return # don't log anything on validation check
+        self.val_epochs.append(self.current_epoch + 1) # +1 because epoch starts at 0
+        for i, v in enumerate(self._epoch_curr_patch_kl_history):
+            self.curr_patch_kl_history[i].append(np.stack(v).mean(axis=0))
+
+        _fig = fig_to_nparray(plot_layer_kl_history_by_dim(self.curr_patch_kl_history, self.val_epochs))
+        self.logger.log_image("curr_patch_kl_history", [_fig])
+
+        if self.do_next_patch_prediction:
+            if not hasattr(self, "npp_kl_history"):
+                self.npp_kl_history = [list() for _ in self._epoch_npp_kl_history]
+            for i, v in enumerate(self._epoch_npp_kl_history):
+                self.npp_kl_history[i].append(np.stack(v).mean(axis=0))
+
+            _fig = fig_to_nparray(plot_layer_kl_history_by_dim(self.npp_kl_history, self.val_epochs))
+            self.logger.log_image("npp_kl_history", [_fig])
+
+        del self._epoch_curr_patch_kl_history
+        del self._epoch_npp_kl_history
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)

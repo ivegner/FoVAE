@@ -1,17 +1,21 @@
 import io
+from typing import List
+from matplotlib.colors import LogNorm
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+
 def fig_to_nparray(fig):
     """Convert a Matplotlib figure to a numpy array with RGBA channels and return it."""
     with io.BytesIO() as buff:
-        fig.savefig(buff, format='raw')
+        fig.savefig(buff, format="raw")
         buff.seek(0)
         data = np.frombuffer(buff.getvalue(), dtype=np.uint8)
     w, h = fig.canvas.get_width_height()
     im = data.reshape((int(h), int(w), -1))
     return im
+
 
 # functions to show an image
 def imshow_unnorm(img: torch.Tensor, ax=None):
@@ -89,3 +93,34 @@ def plot_gaussian_foveation_parameters(
         )
 
     return fig, axs
+
+
+def plot_layer_kl_history_by_dim(kls_by_layer: List[np.ndarray], epoch_indices: List[int]):
+    """Plot KL divergence history for each layer in the network, for each dimension of latent space.
+
+    Args:
+        kls_by_layer (List[List[np.ndarray]]): KL divergence history, of shape
+            (num_layers x num_epochs x num_dims)
+        epoch_indices (List[int]): List of epoch indices to use as x-axis
+    """
+    fig, axs = plt.subplots(len(kls_by_layer), 1, figsize=(6, len(kls_by_layer)*3))
+    for layer_i, ax in enumerate(axs):
+        a = np.array(kls_by_layer[layer_i]).T
+        g = ax.pcolormesh(
+            a,
+            cmap="Blues",
+            shading="auto",
+            norm=LogNorm(vmin=max(a.min(), 0.01), vmax=max(a.max(), 0.01)),
+        )
+        ax.set_title(f"Layer {layer_i}")
+        ax.set_xlabel("Epoch")
+        xticks = list(zip(np.arange(len(epoch_indices)) + 0.5, epoch_indices))
+        # subsample xticks
+        xticks = xticks[:: max(1, len(xticks) // 10)]
+        ax.set_xticks(*zip(*xticks), minor=False)
+        ax.set_ylabel("Latent Unit")
+        plt.colorbar(g)
+
+    fig.tight_layout()
+
+    return fig
