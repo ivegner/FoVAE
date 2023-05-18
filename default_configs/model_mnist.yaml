@@ -34,6 +34,7 @@ model:
     spectral_norm: 0
   free_bits_kl: 0.5
   grad_skip_threshold: -1
+  do_batch_norm: false
   # do_use_beta_norm: false
   frac_random_foveation: 0.0
   do_image_reconstruction: true

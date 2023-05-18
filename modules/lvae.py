@@ -18,7 +18,7 @@ class View(nn.Module):
 
 
 class FFNet(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden_ff_out_dims=None):
+    def __init__(self, in_dim, out_dim, hidden_ff_out_dims=None, batch_norm=False):
         super().__init__()
         self.out_dim = out_dim
 
@@ -31,14 +31,16 @@ class FFNet(nn.Module):
         stack = []
         last_out_dim = in_dim
         for nn_out_dim in hidden_ff_out_dims:
-            stack.extend(
-                [
+            s = [
                     nn.GELU(),
                     # torch.nn.utils.parametrizations.spectral_norm(
-                    nn.Linear(last_out_dim, nn_out_dim)
+                    nn.Linear(last_out_dim, nn_out_dim),
                     # ),
                 ]
-            )  # nn.utils.weight_norm, nn.BatchNorm1d(last_out_dim)
+            # nn.utils.weight_norm, nn.BatchNorm1d(last_out_dim)
+            if batch_norm:
+                s.append(nn.BatchNorm1d(nn_out_dim))
+            stack.extend(s)
             last_out_dim = nn_out_dim
 
         self.encoder = nn.Sequential(*stack)
@@ -53,6 +55,7 @@ class Ladder(nn.Module):
         in_dim: int,
         layer_out_dims: List[int],
         layer_hidden_dims: Optional[List[List[int]]] = None,
+        batch_norm: bool = False,
     ):
         super().__init__()
         self.layer_out_dims = layer_out_dims
@@ -65,6 +68,7 @@ class Ladder(nn.Module):
                     layer_out_dims[i],
                     layer_out_dims[i + 1],
                     hidden_ff_out_dims=layer_hidden_dims[i] if layer_hidden_dims else None,
+                    batch_norm=batch_norm,
                 )
                 for i in range(len(layer_out_dims) - 1)
             ]
@@ -88,6 +92,7 @@ class LadderVAE(nn.Module):
         z_dims: List[int],
         inference_hidden_dims: Optional[List[List[int]]] = None,
         generative_hidden_dims: Optional[List[List[int]]] = None,
+        batch_norm: bool = False,
     ):
         super().__init__()
 
@@ -111,6 +116,7 @@ class LadderVAE(nn.Module):
                     ladder_dims[i],
                     z_dims[i] * 2,
                     hidden_ff_out_dims=inference_hidden_dims[i] if inference_hidden_dims else None,
+                    batch_norm=batch_norm
                 )
                 for i in range(n_vae_layers)
             ]
@@ -125,6 +131,7 @@ class LadderVAE(nn.Module):
                     hidden_ff_out_dims=generative_hidden_dims[i]
                     if generative_hidden_dims
                     else None,
+                    batch_norm=batch_norm
                 )
                 for i in range(n_vae_layers)
             ]

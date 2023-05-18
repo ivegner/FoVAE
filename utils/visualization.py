@@ -116,7 +116,7 @@ def plot_layer_kl_history_by_dim(kls_by_layer: List[np.ndarray], epoch_indices: 
         ax.set_xlabel("Epoch")
         xticks = list(zip(np.arange(len(epoch_indices)) + 0.5, epoch_indices))
         # subsample xticks
-        xticks = xticks[:: max(1, len(xticks) // 10)]
+        xticks = ([None] + xticks)[:: int(10 ** np.floor(np.log10(len(xticks))))][1:]
         ax.set_xticks(*zip(*xticks), minor=False)
         ax.set_ylabel("Latent Unit")
         plt.colorbar(g)
