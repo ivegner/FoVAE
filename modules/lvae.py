@@ -30,7 +30,7 @@ class FFNet(nn.Module):
 
         stack = []
         last_out_dim = in_dim
-        for nn_out_dim in hidden_ff_out_dims:
+        for i, nn_out_dim in enumerate(hidden_ff_out_dims):
             s = [
                     nn.GELU(),
                     # torch.nn.utils.parametrizations.spectral_norm(
@@ -38,7 +38,7 @@ class FFNet(nn.Module):
                     # ),
                 ]
             # nn.utils.weight_norm, nn.BatchNorm1d(last_out_dim)
-            if batch_norm:
+            if batch_norm and i != len(hidden_ff_out_dims) - 1:
                 s.append(nn.BatchNorm1d(nn_out_dim))
             stack.extend(s)
             last_out_dim = nn_out_dim
