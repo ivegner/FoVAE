@@ -43,7 +43,7 @@ class FFBlock(nn.Module):
 class FFNet(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_ff_out_dims=None, batch_norm=False, weight_norm=False):
         super().__init__()
-        assert not (batch_norm and weight_norm), "Cannot have both batch and weight norm"
+        # assert not (batch_norm and weight_norm), "Cannot have both batch and weight norm"
         self.out_dim = out_dim
 
         if not hidden_ff_out_dims:
