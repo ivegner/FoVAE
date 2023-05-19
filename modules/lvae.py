@@ -23,7 +23,7 @@ class FFBlock(nn.Module):
         if batch_norm:# and i != len(hidden_ff_out_dims) - 1:
             self.bn = nn.BatchNorm1d(in_dim)
 
-        self.gelu = nn.GELU()
+        self.gelu = nn.LeakyReLU()
         if weight_norm:
             self.lin = nn.utils.weight_norm(nn.Linear(in_dim, out_dim))
             # https://github.com/pytorch/pytorch/issues/28594#issuecomment-1149882811
