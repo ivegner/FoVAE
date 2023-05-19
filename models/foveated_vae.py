@@ -431,13 +431,13 @@ class FoVAE(pl.LightningModule):
         curr_patch_rec_total_loss = (
             self.betas["curr_patch_recon"] * curr_patch_rec_total_loss / self.num_steps
         )
-        # sum over layers and z_dim (already mean over steps)
+        # sum over layers, mean over z_dim (already mean over steps)
         # TODO: apply free bits to sum of z_dim KLs as opposed to every dim as now?
         curr_patch_kl_div_total_loss = (
             self.betas["curr_patch_kl"]
             * torch.stack(
                 [
-                    free_bits_kl(g, self.free_bits_kl).sum(dim=0)
+                    free_bits_kl(g, self.free_bits_kl).mean(dim=0)
                     for g in curr_patch_kl_divs_by_layer
                 ],
                 dim=0,
@@ -446,7 +446,7 @@ class FoVAE(pl.LightningModule):
         next_patch_pos_kl_div_total_loss = self.betas["next_patch_pos_kl"] * free_bits_kl(
             next_patch_pos_kl_div_total_loss / self.num_steps, self.free_bits_kl
         )
-        # sum over layers (already mean over steps)
+        # mean over z_dim, sum over layers (already mean over steps)
         if DO_COMPUTE_NEXT_PATCH_LOSSES:
             next_patch_rec_total_loss = (
                 self.betas["next_patch_recon"]
@@ -456,7 +456,7 @@ class FoVAE(pl.LightningModule):
                 self.betas["next_patch_kl"]
                 * torch.stack(
                     [
-                        free_bits_kl(g, self.free_bits_kl).sum(dim=0)
+                        free_bits_kl(g, self.free_bits_kl).mean(dim=0)
                         for g in next_patch_kl_divs_by_layer
                     ],
                     dim=0,
@@ -974,7 +974,7 @@ class FoVAE(pl.LightningModule):
             self._epoch_curr_patch_kl_history[i].append(v.detach().cpu().numpy())
 
         _curr_kl_divs = {
-            f"val/curr_patch_kl_l{i}": v.detach().sum().item()
+            f"val/curr_patch_kl_l{i}": v.detach().mean().item()
             for i, v in enumerate(curr_patch_kl_divs_by_layer)
         }
         self.log_dict(_curr_kl_divs)
@@ -984,7 +984,7 @@ class FoVAE(pl.LightningModule):
                 "next_patch_kl_divs_by_layer"
             ]
             _next_kl_divs = {
-                f"val/next_patch_kl_l{i}": v.detach().sum().item()
+                f"val/next_patch_kl_l{i}": v.detach().mean().item()
                 for i, v in enumerate(next_patch_kl_divs_by_layer)
             }
             self.log_dict(_next_kl_divs)
