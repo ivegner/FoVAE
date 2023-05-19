@@ -21,7 +21,12 @@ from utils.vae_utils import (
     free_bits_kl,
     reparam_sample,
 )
-from utils.visualization import imshow_unnorm, plot_gaussian_foveation_parameters, fig_to_nparray, plot_layer_kl_history_by_dim
+from utils.visualization import (
+    imshow_unnorm,
+    plot_gaussian_foveation_parameters,
+    fig_to_nparray,
+    plot_layer_kl_history_by_dim,
+)
 from utils.misc import recursive_to, recursive_detach
 
 # from memory_profiler import profile
@@ -108,7 +113,12 @@ class FoVAE(pl.LightningModule):
 
         self.ladder = Ladder(input_dim, ladder_dims, ladder_hidden_dims, batch_norm=do_batch_norm)
         self.ladder_vae = LadderVAE(
-            input_dim, ladder_dims, z_dims, lvae_inf_hidden_dims, lvae_gen_hidden_dims, batch_norm=do_batch_norm
+            input_dim,
+            ladder_dims,
+            z_dims,
+            lvae_inf_hidden_dims,
+            lvae_gen_hidden_dims,
+            batch_norm=do_batch_norm,
         )
         self.next_patch_predictor = NextPatchPredictor(
             ladder_vae=self.ladder_vae,
@@ -209,9 +219,9 @@ class FoVAE(pl.LightningModule):
         next_patch_kl_div_total_loss = torch.tensor(0.0, device=x.device)
         image_reconstruction_loss = torch.tensor(0.0, device=x.device)
         curr_patch_kl_divs_by_layer, next_patch_rec_losses_by_layer, next_patch_kl_divs_by_layer = (
-            [None] * (self.num_vae_levels+1),
-            [None] * (self.num_vae_levels+1),
-            [None] * (self.num_vae_levels+1),
+            [None] * (self.num_vae_levels + 1),
+            [None] * (self.num_vae_levels + 1),
+            [None] * (self.num_vae_levels + 1),
         )
 
         def memoized_patch_getter(x_full, return_full_periphery=False):
@@ -256,9 +266,7 @@ class FoVAE(pl.LightningModule):
             real_patch_zs.append(curr_patch_dict["sample_zs"])
             real_patch_dicts.append(curr_patch_dict)
 
-            do_random_foveation = (
-                torch.rand(b, device=x.device) < self.frac_random_foveation
-            )
+            do_random_foveation = torch.rand(b, device=x.device) < self.frac_random_foveation
 
             if self.do_next_patch_prediction:
                 next_patch_dict = self._gen_next_patch(
@@ -286,7 +294,9 @@ class FoVAE(pl.LightningModule):
             elif self.frac_random_foveation == 1.0:
                 next_pos = self._get_random_foveation_pos(batch_size=b)
             else:
-                raise ValueError("Must do either next patch prediction or frac_random_foveation=1.0")
+                raise ValueError(
+                    "Must do either next patch prediction or frac_random_foveation=1.0"
+                )
 
             # foveate to next position
             next_patch = get_patch_from_pos(next_pos)
@@ -355,7 +365,6 @@ class FoVAE(pl.LightningModule):
                     if i == 0 and not DO_KL_ON_INPUT_LEVEL:
                         level_kl = torch.zeros_like(level_kl)
 
-
                     if next_patch_rec_losses_by_layer[i] is None:
                         next_patch_rec_losses_by_layer[i] = level_rec_loss
                         next_patch_kl_divs_by_layer[i] = level_kl
@@ -414,7 +423,9 @@ class FoVAE(pl.LightningModule):
         # mean over steps
         curr_patch_kl_divs_by_layer = [g / self.num_steps for g in curr_patch_kl_divs_by_layer]
         if DO_COMPUTE_NEXT_PATCH_LOSSES:
-            next_patch_rec_losses_by_layer = [g / self.num_steps for g in next_patch_rec_losses_by_layer]
+            next_patch_rec_losses_by_layer = [
+                g / self.num_steps for g in next_patch_rec_losses_by_layer
+            ]
             next_patch_kl_divs_by_layer = [g / self.num_steps for g in next_patch_kl_divs_by_layer]
 
         curr_patch_rec_total_loss = (
@@ -424,7 +435,13 @@ class FoVAE(pl.LightningModule):
         # TODO: apply free bits to sum of z_dim KLs as opposed to every dim as now?
         curr_patch_kl_div_total_loss = (
             self.betas["curr_patch_kl"]
-            * torch.stack([free_bits_kl(g, self.free_bits_kl).sum(dim=0) for g in curr_patch_kl_divs_by_layer], dim=0).sum()
+            * torch.stack(
+                [
+                    free_bits_kl(g, self.free_bits_kl).sum(dim=0)
+                    for g in curr_patch_kl_divs_by_layer
+                ],
+                dim=0,
+            ).sum()
         )
         next_patch_pos_kl_div_total_loss = self.betas["next_patch_pos_kl"] * free_bits_kl(
             next_patch_pos_kl_div_total_loss / self.num_steps, self.free_bits_kl
@@ -432,11 +449,18 @@ class FoVAE(pl.LightningModule):
         # sum over layers (already mean over steps)
         if DO_COMPUTE_NEXT_PATCH_LOSSES:
             next_patch_rec_total_loss = (
-                self.betas["next_patch_recon"] * torch.stack(next_patch_rec_losses_by_layer, dim=0).sum()
+                self.betas["next_patch_recon"]
+                * torch.stack(next_patch_rec_losses_by_layer, dim=0).sum()
             )
             next_patch_kl_div_total_loss = (
                 self.betas["next_patch_kl"]
-                * torch.stack([free_bits_kl(g, self.free_bits_kl).sum(dim=0) for g in next_patch_kl_divs_by_layer], dim=0).sum()
+                * torch.stack(
+                    [
+                        free_bits_kl(g, self.free_bits_kl).sum(dim=0)
+                        for g in next_patch_kl_divs_by_layer
+                    ],
+                    dim=0,
+                ).sum()
             )
 
         image_reconstruction_loss = self.betas["image_recon"] * image_reconstruction_loss
@@ -1266,12 +1290,14 @@ class FoVAE(pl.LightningModule):
         if not hasattr(self, "curr_patch_kl_history"):
             self.curr_patch_kl_history = [list() for _ in self._epoch_curr_patch_kl_history]
             self.val_epochs = []
-            return # don't log anything on validation check
-        self.val_epochs.append(self.current_epoch + 1) # +1 because epoch starts at 0
+            return  # don't log anything on validation check
+        self.val_epochs.append(self.current_epoch + 1)  # +1 because epoch starts at 0
         for i, v in enumerate(self._epoch_curr_patch_kl_history):
             self.curr_patch_kl_history[i].append(np.stack(v).mean(axis=0))
 
-        _fig = fig_to_nparray(plot_layer_kl_history_by_dim(self.curr_patch_kl_history, self.val_epochs))
+        _fig = fig_to_nparray(
+            plot_layer_kl_history_by_dim(self.curr_patch_kl_history, self.val_epochs)
+        )
         self.logger.log_image("curr_patch_kl_history", [_fig])
 
         if self.do_next_patch_prediction:
@@ -1280,7 +1306,9 @@ class FoVAE(pl.LightningModule):
             for i, v in enumerate(self._epoch_npp_kl_history):
                 self.npp_kl_history[i].append(np.stack(v).mean(axis=0))
 
-            _fig = fig_to_nparray(plot_layer_kl_history_by_dim(self.npp_kl_history, self.val_epochs))
+            _fig = fig_to_nparray(
+                plot_layer_kl_history_by_dim(self.npp_kl_history, self.val_epochs)
+            )
             self.logger.log_image("npp_kl_history", [_fig])
 
         del self._epoch_curr_patch_kl_history

@@ -32,11 +32,11 @@ class FFNet(nn.Module):
         last_out_dim = in_dim
         for i, nn_out_dim in enumerate(hidden_ff_out_dims):
             s = [
-                    nn.GELU(),
-                    # torch.nn.utils.parametrizations.spectral_norm(
-                    nn.Linear(last_out_dim, nn_out_dim),
-                    # ),
-                ]
+                nn.GELU(),
+                # torch.nn.utils.parametrizations.spectral_norm(
+                nn.Linear(last_out_dim, nn_out_dim),
+                # ),
+            ]
             # nn.utils.weight_norm, nn.BatchNorm1d(last_out_dim)
             if batch_norm and i != len(hidden_ff_out_dims) - 1:
                 s.append(nn.BatchNorm1d(nn_out_dim))
@@ -116,7 +116,7 @@ class LadderVAE(nn.Module):
                     ladder_dims[i],
                     z_dims[i] * 2,
                     hidden_ff_out_dims=inference_hidden_dims[i] if inference_hidden_dims else None,
-                    batch_norm=batch_norm
+                    batch_norm=batch_norm,
                 )
                 for i in range(n_vae_layers)
             ]
@@ -131,7 +131,7 @@ class LadderVAE(nn.Module):
                     hidden_ff_out_dims=generative_hidden_dims[i]
                     if generative_hidden_dims
                     else None,
-                    batch_norm=batch_norm
+                    batch_norm=batch_norm,
                 )
                 for i in range(n_vae_layers)
             ]
