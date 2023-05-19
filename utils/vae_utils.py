@@ -41,7 +41,7 @@ def gaussian_likelihood(
 
     except ValueError as e:
         print(e)
-        return torch.nan
+        s = torch.zeros_like(mu).fill_(torch.nan)
 
     if batch_reduce_fn == "mean":
         s = s.mean()
@@ -126,7 +126,7 @@ def gaussian_kl_divergence(
 
     except ValueError as e:
         print(e)
-        return torch.nan
+        kl = torch.zeros_like(mu).fill_(torch.nan)
 
     if batch_reduce_fn == "mean":
         kl = kl.mean(dim=0)
@@ -219,10 +219,10 @@ def reparam_sample(
         # print(f"Could not sample without NaNs (try {i})")
         i += 1
     else:
-        print("Could not sample from N(0, 1) without NaNs after 20 tries")
-        print("mu:", mu.max(), mu.min())
-        # print("raw_logstd:", raw_logstd.max(), raw_logstd.min())
-        print("std:", std.max(), std.min())
+        # print("Could not sample from N(0, 1) without NaNs after 20 tries")
+        # print("mu:", mu.max(), mu.min())
+        # # print("raw_logstd:", raw_logstd.max(), raw_logstd.min())
+        # print("std:", std.max(), std.min())
         return torch.empty_like(mu).fill_(torch.nan)
 
 

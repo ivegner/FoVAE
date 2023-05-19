@@ -106,6 +106,8 @@ def plot_layer_kl_history_by_dim(kls_by_layer: List[np.ndarray], epoch_indices: 
     fig, axs = plt.subplots(len(kls_by_layer), 1, figsize=(6, len(kls_by_layer)*3))
     for layer_i, ax in enumerate(axs):
         a = np.array(kls_by_layer[layer_i]).T
+        # replace nan with 0
+        a = np.nan_to_num(a)
         g = ax.pcolormesh(
             a,
             cmap="Blues",

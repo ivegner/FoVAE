@@ -740,7 +740,7 @@ class FoVAE(pl.LightningModule):
         gaussian_filter_params = deepcopy(self.default_gaussian_filter_params)  # TODO: optimize
         for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
             new_mus = ring["mus"] + (loc - generic_center).unsqueeze(1)
-            if not torch.isclose(new_mus.mean(1), loc, atol=1e-4).all():
+            if not torch.isclose(new_mus.mean(1), loc, atol=1e-4).all() and not torch.isnan(new_mus).any():
                 print(
                     f"New gaussian centers after move not close to loc: "
                     f"{new_mus.mean(1)[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]} "
