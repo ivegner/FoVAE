@@ -68,6 +68,7 @@ class FoVAE(pl.LightningModule):
         # n_spectral_iter=1,
         grad_skip_threshold=-1,
         do_batch_norm=False,
+        do_weight_norm=False,
         # do_use_beta_norm=True,
         frac_random_foveation=0.0,
         do_image_reconstruction=True,
@@ -111,7 +112,13 @@ class FoVAE(pl.LightningModule):
 
         input_dim = self.num_channels * self.patch_dim * self.patch_dim
 
-        self.ladder = Ladder(input_dim, ladder_dims, ladder_hidden_dims, batch_norm=do_batch_norm)
+        self.ladder = Ladder(
+            input_dim,
+            ladder_dims,
+            ladder_hidden_dims,
+            batch_norm=do_batch_norm,
+            weight_norm=do_weight_norm,
+        )
         self.ladder_vae = LadderVAE(
             input_dim,
             ladder_dims,
@@ -119,6 +126,7 @@ class FoVAE(pl.LightningModule):
             lvae_inf_hidden_dims,
             lvae_gen_hidden_dims,
             batch_norm=do_batch_norm,
+            weight_norm=do_weight_norm,
         )
         self.next_patch_predictor = NextPatchPredictor(
             ladder_vae=self.ladder_vae,
@@ -740,7 +748,10 @@ class FoVAE(pl.LightningModule):
         gaussian_filter_params = deepcopy(self.default_gaussian_filter_params)  # TODO: optimize
         for ring in [gaussian_filter_params["fovea"], *gaussian_filter_params["peripheral_rings"]]:
             new_mus = ring["mus"] + (loc - generic_center).unsqueeze(1)
-            if not torch.isclose(new_mus.mean(1), loc, atol=1e-4).all() and not torch.isnan(new_mus).any():
+            if (
+                not torch.isclose(new_mus.mean(1), loc, atol=1e-4).all()
+                and not torch.isnan(new_mus).any()
+            ):
                 print(
                     f"New gaussian centers after move not close to loc: "
                     f"{new_mus.mean(1)[torch.argmax((new_mus.mean(1) - loc).sum(1), 0)]} "
