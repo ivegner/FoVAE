@@ -49,6 +49,9 @@ class MyLightningCLI(LightningCLI):
             if callback.class_path == "pytorch_lightning.callbacks.ModelCheckpoint":
                 callback.init_args.dirpath = f"checkpoints/{run_id}"
 
+    def before_fit(self):
+        print(self.model)
+
 def cli_main():
     _cli = MyLightningCLI(
         FoVAE,

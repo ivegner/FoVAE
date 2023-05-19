@@ -16,6 +16,24 @@ class View(nn.Module):
     def forward(self, tensor):
         return tensor.view(self.size)
 
+class FFBlock(nn.Module):
+    def __init__(self, in_dim, out_dim, batch_norm=False):
+        super().__init__()
+        self.do_batch_norm = batch_norm
+        if batch_norm:# and i != len(hidden_ff_out_dims) - 1:
+            self.bn = nn.BatchNorm1d(in_dim)
+
+        self.gelu = nn.GELU()
+        self.lin = nn.Linear(in_dim, out_dim)
+        # torch.nn.utils.parametrizations.spectral_norm
+        # nn.utils.weight_norm, nn.BatchNorm1d(last_out_dim)
+
+    def forward(self, x):
+        if self.do_batch_norm:
+            x = self.bn(x)
+        x = self.gelu(x)
+        x = self.lin(x)
+        return x
 
 class FFNet(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_ff_out_dims=None, batch_norm=False):
@@ -31,20 +49,7 @@ class FFNet(nn.Module):
         stack = []
         last_out_dim = in_dim
         for i, nn_out_dim in enumerate(hidden_ff_out_dims):
-            s = []
-            if batch_norm:# and i != len(hidden_ff_out_dims) - 1:
-                s.append(nn.BatchNorm1d(last_out_dim))
-
-            s.extend(
-                [
-                    nn.GELU(),
-                    # torch.nn.utils.parametrizations.spectral_norm(
-                    nn.Linear(last_out_dim, nn_out_dim),
-                    # ),
-                ]
-            )
-            # nn.utils.weight_norm, nn.BatchNorm1d(last_out_dim)
-            stack.extend(s)
+            stack.append(FFBlock(last_out_dim, nn_out_dim, batch_norm=batch_norm))
             last_out_dim = nn_out_dim
 
         self.encoder = nn.Sequential(*stack)
