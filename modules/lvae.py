@@ -23,7 +23,7 @@ class FFBlock(nn.Module):
         if batch_norm:# and i != len(hidden_ff_out_dims) - 1:
             self.bn = nn.BatchNorm1d(in_dim)
 
-        self.gelu = nn.LeakyReLU()
+        self.gelu = nn.GELU()
         if weight_norm:
             self.lin = nn.utils.weight_norm(nn.Linear(in_dim, out_dim))
             # https://github.com/pytorch/pytorch/issues/28594#issuecomment-1149882811
@@ -41,10 +41,11 @@ class FFBlock(nn.Module):
         return x
 
 class FFNet(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden_ff_out_dims=None, batch_norm=False, weight_norm=False):
+    def __init__(self, in_dim, out_dim, hidden_ff_out_dims=None, batch_norm=False, weight_norm=False, skip_connection=False):
         super().__init__()
         # assert not (batch_norm and weight_norm), "Cannot have both batch and weight norm"
         self.out_dim = out_dim
+        self.do_skip_connection = skip_connection
 
         if not hidden_ff_out_dims:
             hidden_ff_out_dims = []
@@ -61,7 +62,10 @@ class FFNet(nn.Module):
         self.encoder = nn.Sequential(*stack)
 
     def forward(self, x):
-        return self.encoder(x)
+        if self.do_skip_connection:
+            return self.encoder(x) + x
+        else:
+            return self.encoder(x)
 
 
 class Ladder(nn.Module):
@@ -72,6 +76,7 @@ class Ladder(nn.Module):
         layer_hidden_dims: Optional[List[List[int]]] = None,
         batch_norm: bool = False,
         weight_norm: bool = False,
+        skip_connection: bool = False,
     ):
         super().__init__()
         self.layer_out_dims = layer_out_dims
@@ -85,7 +90,8 @@ class Ladder(nn.Module):
                     layer_out_dims[i + 1],
                     hidden_ff_out_dims=layer_hidden_dims[i] if layer_hidden_dims else None,
                     batch_norm=batch_norm,
-                    weight_norm=weight_norm
+                    weight_norm=weight_norm,
+                    skip_connection=skip_connection,
                 )
                 for i in range(len(layer_out_dims) - 1)
             ]
@@ -111,6 +117,7 @@ class LadderVAE(nn.Module):
         generative_hidden_dims: Optional[List[List[int]]] = None,
         batch_norm: bool = False,
         weight_norm: bool = False,
+        skip_connection: bool = False,
     ):
         super().__init__()
 
@@ -135,7 +142,8 @@ class LadderVAE(nn.Module):
                     z_dims[i] * 2,
                     hidden_ff_out_dims=inference_hidden_dims[i] if inference_hidden_dims else None,
                     batch_norm=batch_norm,
-                    weight_norm=weight_norm
+                    weight_norm=weight_norm,
+                    skip_connection=skip_connection,
                 )
                 for i in range(n_vae_layers)
             ]
@@ -151,7 +159,8 @@ class LadderVAE(nn.Module):
                     if generative_hidden_dims
                     else None,
                     batch_norm=batch_norm,
-                    weight_norm=weight_norm
+                    weight_norm=weight_norm,
+                    skip_connection=skip_connection,
                 )
                 for i in range(n_vae_layers)
             ]

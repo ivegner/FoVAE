@@ -69,6 +69,7 @@ class FoVAE(pl.LightningModule):
         grad_skip_threshold=-1,
         do_batch_norm=False,
         do_weight_norm=False,
+        do_lvae_skip_connection=False,
         # do_use_beta_norm=True,
         frac_random_foveation=0.0,
         do_image_reconstruction=True,
@@ -118,6 +119,7 @@ class FoVAE(pl.LightningModule):
             ladder_hidden_dims,
             batch_norm=do_batch_norm,
             weight_norm=do_weight_norm,
+            skip_connection=False # TODO
         )
         self.ladder_vae = LadderVAE(
             input_dim,
@@ -127,6 +129,7 @@ class FoVAE(pl.LightningModule):
             lvae_gen_hidden_dims,
             batch_norm=do_batch_norm,
             weight_norm=do_weight_norm,
+            skip_connection=do_lvae_skip_connection,
         )
         self.next_patch_predictor = NextPatchPredictor(
             ladder_vae=self.ladder_vae,
