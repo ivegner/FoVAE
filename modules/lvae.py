@@ -117,7 +117,7 @@ class LadderVAE(nn.Module):
         generative_hidden_dims: Optional[List[List[int]]] = None,
         batch_norm: bool = False,
         weight_norm: bool = False,
-        skip_connection: bool = False,
+        gen_skip_connection: bool = False,
     ):
         super().__init__()
 
@@ -143,7 +143,6 @@ class LadderVAE(nn.Module):
                     hidden_ff_out_dims=inference_hidden_dims[i] if inference_hidden_dims else None,
                     batch_norm=batch_norm,
                     weight_norm=weight_norm,
-                    skip_connection=skip_connection,
                 )
                 for i in range(n_vae_layers)
             ]
@@ -160,7 +159,6 @@ class LadderVAE(nn.Module):
                     else None,
                     batch_norm=batch_norm,
                     weight_norm=weight_norm,
-                    skip_connection=skip_connection,
                 )
                 for i in range(n_vae_layers)
             ]
@@ -184,6 +182,7 @@ class LadderVAE(nn.Module):
         self.gen_logstd_norm = "bounded"
         self.gen_std_bound_min = 0.001
         self.gen_std_bound_max = 1.0
+        self.do_gen_skip_connection = gen_skip_connection
 
     def forward(
         self,
@@ -286,6 +285,8 @@ class LadderVAE(nn.Module):
                 mu_stds_gen.insert(0, (mu, std))
                 # generate sample
                 z = reparam_sample(mu, std)
+                if self.do_gen_skip_connection and not is_top_layer:
+                    z = z + sample_zs[0]
             sample_zs.insert(0, z)
 
             # create next prior mu, std from sample
