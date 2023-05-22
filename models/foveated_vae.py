@@ -1030,8 +1030,12 @@ class FoVAE(pl.LightningModule):
         total_loss = forward_out["losses"]["total_loss"]
         # self.log("train_total_loss", total_loss, prog_bar=True)
         self.log_dict({"train/" + k: v.detach().item() for k, v in forward_out["losses"].items()})
-        patch_noise_std_mean = self.patch_noise_std.detach().mean().item()
-        self.log("patch_noise_std_mean", patch_noise_std_mean, logger=True, on_step=True)
+        # patch_noise_std_mean = self.patch_noise_std.detach().mean().item()
+        # self.log("patch_noise_std_mean", patch_noise_std_mean, logger=True, on_step=True)
+
+        if self.do_soft_foveation:
+            self.log("train/soft_foveation_sigma", self.soft_foveation_sigma.detach().item())
+            self.log("train/soft_foveation_local_bias", self.soft_foveation_local_bias.detach().item())
 
         # self._optimizer_step(loss)
         # TODO: skip on grad norm
