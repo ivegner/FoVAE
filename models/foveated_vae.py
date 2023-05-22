@@ -65,6 +65,8 @@ class FoVAE(pl.LightningModule):
             spectral_norm=0,
         ),
         free_bits_kl=0,
+        soft_foveation_grid_size=None,
+        do_soft_foveation=False,
         # n_spectral_iter=1,
         grad_skip_threshold=-1,
         do_batch_norm=False,
@@ -119,7 +121,7 @@ class FoVAE(pl.LightningModule):
             ladder_hidden_dims,
             batch_norm=do_batch_norm,
             weight_norm=do_weight_norm,
-            skip_connection=False # TODO
+            skip_connection=False,  # TODO
         )
         self.ladder_vae = LadderVAE(
             input_dim,
@@ -198,6 +200,11 @@ class FoVAE(pl.LightningModule):
         self.do_lateral_connections = do_lateral_connections
         self.npp_do_mask_to_last_step = npp_do_mask_to_last_step
         self.npp_do_curiosity = npp_do_curiosity
+        self.do_soft_foveation = do_soft_foveation
+        if do_soft_foveation:
+            self.soft_foveation_grid_size = soft_foveation_grid_size
+            self.soft_foveation_sigma = nn.Parameter(torch.Tensor(0.1)) # TODO
+            self.soft_foveation_local_bias = nn.Parameter(torch.Tensor(1000)) # TODO
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -703,19 +710,92 @@ class FoVAE(pl.LightningModule):
             else:
                 padded_image = image
 
-        # pad_h, pad_w = padded_image.shape[-2:]
+        if self.do_soft_foveation:
+            if _fov_memo and "soft_patches" in _fov_memo:
+                soft_patches = _fov_memo["soft_patches"]
+                all_locs = _fov_memo["all_locs"]
+            else:
+                # build patches for all possible locations
+                # build grid of locations spanning (-1, 1) in both dims
+                # (out_h, out_w, 2)
+                all_locs = torch.stack(
+                    torch.meshgrid(
+                        torch.linspace(-1, 1, self.soft_foveation_grid_size),
+                        torch.linspace(-1, 1, self.soft_foveation_grid_size),
+                    ),
+                    dim=-1,
+                ).to(self.device)
+                # (out_h, out_w, 2) -> (b*out_h*out_w, 2)
+                all_locs = all_locs.view(-1, 1, 2).repeat(1, b, 1)
+                soft_patches = []
+                for _loc in all_locs:
+                    # consider vectorizing
+                    gaussian_filter_params = self._move_default_filter_params_to_loc(
+                        _loc, (h, w), pad_offset
+                    )
+                    _patches, _fov_memo = fov_utils.apply_mean_foveation_pyramid(
+                        padded_image, gaussian_filter_params, memo=_fov_memo
+                    )
+                    soft_patches.append(_patches)
+                # (out_h * out_w, b, c, h, w) -> (b, out_h * out_w, c, h, w)
+                soft_patches = torch.stack(soft_patches, dim=0).transpose(0, 1)
 
-        # move the gaussian filter params to the loc
-        gaussian_filter_params = self._move_default_filter_params_to_loc(loc, (h, w), pad_offset)
+            # soft attention over soft_patches based on position encodings (loc vs. last 2 dimensions of c)
+            # loc: (b, 2)
+            # soft_patches: (b, out_h*out_w, c, h, w)
+            # foveated_image: (b, c, h, w)
+            _loc = (
+                torch.cat(
+                    (
+                        torch.zeros((b, self.num_channels - 2), device=self.device),
+                        loc,
+                    ),
+                    dim=-1,
+                )
+                .view(b, c, 1, 1)
+                .expand(b, c, self.patch_dim, self.patch_dim)
+            )
 
-        # foveate
-        foveated_image, _fov_memo = fov_utils.apply_mean_foveation_pyramid(
-            padded_image, gaussian_filter_params, memo=_fov_memo
-        )
+            # mask out all channels except the last 2 (position)
+            if _fov_memo and "channel_mask" in _fov_memo:
+                channel_mask = _fov_memo["channel_mask"]
+            else:
+                channel_mask = torch.zeros((1, self.num_channels, 1, 1), device=self.device)
+                channel_mask[:, -2:, :, :] = 1.0
+
+            # make gaussian attention mask over all_locs, centered at loc
+            # TODO: soft_foveation_sigma
+            gaussian_mask = F.softmax(torch.exp(
+                -torch.sum((all_locs - loc.unsqueeze(0)) ** 2, dim=-1) / (2 * self.soft_foveation_sigma ** 2)
+            ), dim=0).transpose(0, 1).unsqueeze(1)
+
+            embed_dim = c * self.patch_dim * self.patch_dim
+            foveated_image = F.scaled_dot_product_attention(
+                (_loc * channel_mask).view(b, 1, embed_dim),
+                (soft_patches * channel_mask.unsqueeze(1)).view(b, -1, embed_dim),
+                soft_patches.view(b, -1, embed_dim),
+                attn_mask=gaussian_mask * self.soft_foveation_local_bias,
+            )
+            foveated_image = foveated_image.view(b, c, self.patch_dim, self.patch_dim)
+
+        else:
+            # move the gaussian filter params to the loc
+            gaussian_filter_params = self._move_default_filter_params_to_loc(
+                loc, (h, w), pad_offset
+            )
+
+            # foveate
+            foveated_image, _fov_memo = fov_utils.apply_mean_foveation_pyramid(
+                padded_image, gaussian_filter_params, memo=_fov_memo
+            )
 
         _fov_memo["orig_image"] = image
         _fov_memo["padded_image"] = padded_image
         _fov_memo["pad_offset"] = pad_offset
+        if self.do_soft_foveation:
+            _fov_memo["soft_patches"] = soft_patches
+            _fov_memo["all_locs"] = all_locs
+            _fov_memo["channel_mask"] = channel_mask
 
         if foveated_image.isnan().any():
             raise ValueError("NaNs in foveated image!")

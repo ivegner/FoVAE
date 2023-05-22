@@ -33,6 +33,7 @@ model:
     image_recon: 1
     spectral_norm: 0
   free_bits_kl: 0.5
+  soft_foveation_grid_size: null
   grad_skip_threshold: -1
   do_batch_norm: false
   do_weight_norm: false
@@ -41,6 +42,7 @@ model:
   frac_random_foveation: 0.0
   do_image_reconstruction: true
   do_next_patch_prediction: true
+  do_soft_foveation: false
   reconstruct_fovea_only: false
   do_lateral_connections: true
   do_sigmoid_next_location: false
