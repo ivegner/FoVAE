@@ -203,8 +203,12 @@ class FoVAE(pl.LightningModule):
         self.do_soft_foveation = do_soft_foveation
         if do_soft_foveation:
             self.soft_foveation_grid_size = soft_foveation_grid_size
-            self.soft_foveation_sigma = nn.Parameter(torch.tensor([0.1]), requires_grad=False) # TODO
-            self.soft_foveation_local_bias = nn.Parameter(torch.tensor([1000.0]), requires_grad=False) # TODO
+            self.soft_foveation_sigma = nn.Parameter(
+                torch.tensor([0.1]), requires_grad=False
+            )  # TODO
+            self.soft_foveation_local_bias = nn.Parameter(
+                torch.tensor([1000.0]), requires_grad=False
+            )  # TODO
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
@@ -229,6 +233,7 @@ class FoVAE(pl.LightningModule):
         x_full = self._add_pos_encodings_to_img_batch(x)
 
         DO_KL_ON_INPUT_LEVEL = False
+        DO_KL_AGAINST_NEXT_LEVEL = True
 
         curr_patch_rec_total_loss = torch.tensor(0.0, device=x.device)
         curr_patch_kl_div_total_loss = torch.tensor(0.0, device=x.device)
@@ -332,16 +337,20 @@ class FoVAE(pl.LightningModule):
                 is_bottom_level=True,
                 fovea_only=self.reconstruct_fovea_only,
             )
+            curr_patch_rec_total_loss += _curr_patch_rec_loss
 
-            for i, (mu, std) in enumerate(curr_patch_dict["mu_stds_gen"]):
-                kl = self._kl_divergence(mu=mu, std=std)
-                if i == 0 and not DO_KL_ON_INPUT_LEVEL:
-                    kl = torch.zeros_like(kl)
-
+            _curr_patch_mu_std = curr_patch_dict["mu_stds_gen"]
+            for i, level_kl in enumerate(
+                _curr_patch_kls_by_layer := self._compute_layerwise_kl(
+                    _curr_patch_mu_std,
+                    do_kl_on_input_level=DO_KL_ON_INPUT_LEVEL,
+                    do_kl_against_next_level=DO_KL_AGAINST_NEXT_LEVEL,
+                )
+            ):
                 if curr_patch_kl_divs_by_layer[i] is None:
-                    curr_patch_kl_divs_by_layer[i] = kl
+                    curr_patch_kl_divs_by_layer[i] = level_kl
                 else:
-                    curr_patch_kl_divs_by_layer[i] += kl
+                    curr_patch_kl_divs_by_layer[i] += level_kl
 
             # calculate kl divergence between predicted next patch pos and std-normal prior
             # only do kl divergence because
@@ -352,13 +361,15 @@ class FoVAE(pl.LightningModule):
                     mu=next_patch_dict["position"]["next_pos_mu"],
                     std=next_patch_dict["position"]["next_pos_std"],
                 ).sum(-1)
+            next_patch_pos_kl_div_total_loss += _next_patch_pos_kl_div
 
             # if any previous predicted patch, calculate loss between
             # current patch and previous predicted patch
             if self.do_next_patch_prediction and len(gen_patch_zs) > 1:
                 # -2 because -1 is the current step, and -2 is the previous step
                 prev_gen_patch_dict = gen_patch_dicts[-2]
-                for i, (mu, std) in enumerate(prev_gen_patch_dict["generation"]["mu_stds_gen"]):
+                prev_gen_mu_std = prev_gen_patch_dict["generation"]["mu_stds_gen"]
+                for i, (mu, std) in enumerate(prev_gen_mu_std):
                     if i == 0:
                         # input-level, compare against real patch
                         level_rec_loss = -1 * self._patch_likelihood(
@@ -368,31 +379,29 @@ class FoVAE(pl.LightningModule):
                             is_bottom_level=True,
                             fovea_only=self.reconstruct_fovea_only,
                         )
-                        level_kl = self._kl_divergence(mu=mu, std=std)
                     else:
                         level_rec_loss = -1 * self._patch_likelihood(
                             curr_patch_dict["sample_zs"][i],
                             mu=mu,
                             std=std,
                         )
-                        level_kl = self._kl_divergence(
-                            mu=mu,
-                            std=std,
-                        )
-
-                    if i == 0 and not DO_KL_ON_INPUT_LEVEL:
-                        level_kl = torch.zeros_like(level_kl)
 
                     if next_patch_rec_losses_by_layer[i] is None:
                         next_patch_rec_losses_by_layer[i] = level_rec_loss
-                        next_patch_kl_divs_by_layer[i] = level_kl
                     else:
                         next_patch_rec_losses_by_layer[i] += level_rec_loss
-                        next_patch_kl_divs_by_layer[i] += level_kl
 
-            # aggregate losses
-            curr_patch_rec_total_loss += _curr_patch_rec_loss
-            next_patch_pos_kl_div_total_loss += _next_patch_pos_kl_div
+                for i, level_kl in enumerate(
+                    _next_patch_kls_by_layer := self._compute_layerwise_kl(
+                        prev_gen_mu_std,
+                        do_kl_on_input_level=DO_KL_ON_INPUT_LEVEL,
+                        do_kl_against_next_level=DO_KL_AGAINST_NEXT_LEVEL,
+                    )
+                ):
+                    if next_patch_kl_divs_by_layer[i] is None:
+                        next_patch_kl_divs_by_layer[i] = level_kl
+                    else:
+                        next_patch_kl_divs_by_layer[i] += level_kl
 
             # check that the next patch's position is close to the position from which
             # it was supposed to be extracted
@@ -538,6 +547,29 @@ class FoVAE(pl.LightningModule):
                 # image_reconstruction_patches=image_reconstruction_patches,
             ),
         )
+
+    def _compute_layerwise_kl(
+        self,
+        mu_stds_gen: Tuple[torch.Tensor, torch.Tensor],
+        do_kl_on_input_level=False,
+        do_kl_against_next_level=True,
+    ):
+        kl_divs_by_layer = []
+        for i, (mu, std) in enumerate(mu_stds_gen):
+            if 0 < i < len(mu_stds_gen) - 1 and do_kl_against_next_level:
+                # not top-level, compare against next-level mu_prior
+                mu_prior, std_prior = mu_stds_gen[i + 1]
+            else:
+                # top-level or bottom-level, compare against std-normal prior
+                mu_prior, std_prior = torch.zeros_like(mu), torch.ones_like(std)
+
+            level_kl = self._kl_divergence(mu=mu, std=std, mu_prior=mu_prior, std_prior=std_prior)
+
+            if i == 0 and not do_kl_on_input_level:
+                level_kl = torch.zeros_like(level_kl)
+
+            kl_divs_by_layer.append(level_kl)
+        return kl_divs_by_layer
 
     def _patch_likelihood(self, patch, mu, std, is_bottom_level=False, fovea_only=False):
         if std.size() == torch.Size([1]):
@@ -765,9 +797,17 @@ class FoVAE(pl.LightningModule):
 
             # make gaussian attention mask over all_locs, centered at loc
             # TODO: soft_foveation_sigma
-            gaussian_mask = F.softmax(torch.exp(
-                -torch.sum((all_locs - loc.unsqueeze(0)) ** 2, dim=-1) / (2 * self.soft_foveation_sigma ** 2)
-            ), dim=0).transpose(0, 1).unsqueeze(1)
+            gaussian_mask = (
+                F.softmax(
+                    torch.exp(
+                        -torch.sum((all_locs - loc.unsqueeze(0)) ** 2, dim=-1)
+                        / (2 * self.soft_foveation_sigma**2)
+                    ),
+                    dim=0,
+                )
+                .transpose(0, 1)
+                .unsqueeze(1)
+            )
 
             embed_dim = c * self.patch_dim * self.patch_dim
             foveated_image = F.scaled_dot_product_attention(
@@ -1035,7 +1075,9 @@ class FoVAE(pl.LightningModule):
 
         if self.do_soft_foveation:
             self.log("train/soft_foveation_sigma", self.soft_foveation_sigma.detach().item())
-            self.log("train/soft_foveation_local_bias", self.soft_foveation_local_bias.detach().item())
+            self.log(
+                "train/soft_foveation_local_bias", self.soft_foveation_local_bias.detach().item()
+            )
 
         # self._optimizer_step(loss)
         # TODO: skip on grad norm
