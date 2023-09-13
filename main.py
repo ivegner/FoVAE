@@ -7,6 +7,8 @@ from models.foveated_vae import FoVAE
 from data import ImageDataModule
 import wandb
 from pprint import pprint
+import yaml
+import tempfile
 
 default_config_dir = "default_configs"
 
@@ -39,10 +41,12 @@ class MyLightningCLI(LightningCLI):
 
         if c.resume_run_id:
             api = wandb.Api()
-            artifact = api.artifact(f'{c.trainer.logger.init_args.project}/model-{c.resume_run_id}:latest', type="model")
+            artifact = api.artifact(
+                f"{c.trainer.logger.init_args.project}/model-{c.resume_run_id}:latest", type="model"
+            )
             # artifact_dir = artifact.download(make_checkpoint_dir(c.resume_run_id))
             artifact_dir = artifact.download()
-            c.ckpt_path=str(Path(artifact_dir) / "model.ckpt")
+            c.ckpt_path = str(Path(artifact_dir) / "model.ckpt")
 
         c.trainer.logger.init_args.id = run_id
         for callback in c.trainer.callbacks:
@@ -50,7 +54,23 @@ class MyLightningCLI(LightningCLI):
                 callback.init_args.dirpath = f"checkpoints/{run_id}"
 
     def before_fit(self):
+        run = wandb.run
+
+        # save config to temp file, then log to WandB as artifact
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml") as f:
+            yaml.dump(self.config.as_dict(), f)
+            f.flush()
+            artifact = wandb.Artifact(
+                name=f"config-{run.id}.yaml",
+                type="config",
+                description="config file for this run",
+            )
+            artifact.add_file(f.name)
+            run.log_artifact(artifact)
+
+
         print(self.model)
+
 
 def cli_main():
     _cli = MyLightningCLI(
