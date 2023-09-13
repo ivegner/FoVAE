@@ -21,6 +21,10 @@ class ImageDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.persistent_workers = persistent_workers
         _transforms = [transforms.ToTensor()]
+
+        self.dataset_name = dataset
+        self.resize = resize
+
         if resize:
             _transforms.insert(0, transforms.Resize(resize, antialias=True))
         if dataset == "mnist":

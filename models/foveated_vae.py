@@ -1,5 +1,6 @@
 import gc
 from copy import deepcopy
+from timeit import default_timer as timer
 from typing import Any, Iterable, List, Literal, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -10,24 +11,22 @@ import torch.nn.functional as F
 import torch.nn.init as init
 import torchvision
 from torch import nn, optim
-from timeit import default_timer as timer
+torchvision.disable_beta_transforms_warning()
+from torchvision.transforms import v2
+
 import wandb
 
+
 import utils.foveation as fov_utils
+from data import ImageDataModule
 from modules.lvae import Ladder, LadderVAE, NextPatchPredictor
-from utils.vae_utils import (
-    gaussian_kl_divergence,
-    gaussian_likelihood,
-    free_bits_kl,
-    reparam_sample,
-)
-from utils.visualization import (
-    imshow_unnorm,
-    plot_gaussian_foveation_parameters,
-    fig_to_nparray,
-    plot_layer_kl_history_by_dim,
-)
-from utils.misc import recursive_to, recursive_detach
+from utils.misc import recursive_detach, recursive_to
+from utils.vae_utils import (free_bits_kl, gaussian_kl_divergence,
+                             gaussian_likelihood, reparam_sample)
+from utils.visualization import (fig_to_nparray, imshow_unnorm,
+                                 plot_gaussian_foveation_parameters,
+                                 plot_layer_kl_history_by_dim,
+                                 visualize_model_output)
 
 # from memory_profiler import profile
 plt.ioff()
@@ -191,6 +190,7 @@ class FoVAE(pl.LightningModule):
             # in pyramidal case, pixel ring i averages ring_scaling_factor^i pixels
             ring_sigma_scaling_factor=patch_ring_scaling_factor,
             max_ring_radius=patch_max_ring_radius,
+            device=self.device,
         )
         self.frac_random_foveation = frac_random_foveation
         self.do_image_reconstruction = do_image_reconstruction
@@ -1134,277 +1134,25 @@ class FoVAE(pl.LightningModule):
             for i, v in enumerate(next_patch_kl_divs_by_layer):
                 self._epoch_npp_kl_history[i].append(v.detach().cpu().numpy())
 
-        step_sample_zs = forward_out["step_vars"]["real_patch_zs"]
-        # step_z_recons = forward_out["step_vars"]["z_recons"]
-        step_next_z_preds = forward_out["step_vars"]["gen_patch_zs"]
-        patches = forward_out["step_vars"]["patches"]
-        step_patch_positions = forward_out["step_vars"]["patch_positions"]
-
-        # step_sample_zs: (n_steps, n_layers, batch_size, z_dim)
-        assert (
-            patches[0][0].size()
-            == step_sample_zs[0][0][0].size()
-            == torch.Size([self.num_channels * self.patch_dim * self.patch_dim])
-        )
-        assert step_sample_zs[0][1][0].size() == torch.Size([self.z_dims[0]])
-
-        # self.logger.log_image(
-        #     "Real Images",
-        #     [
-        #         torchvision.utils.make_grid(
-        #             remove_pos_channels_from_batch(
-        #                 patches[0][:4].view(
-        #                     -1, self.num_channels, self.patch_dim, self.patch_dim
-        #                 )
-        #                 / 2
-        #                 + 0.5
-        #             ).cpu(),
-        #             nrow=8,
-        #             padding=1,
-        #         )
-        #     ],
-        # )
-
         if batch_idx == 0:
-            N_TO_PLOT = 4
-            # real = torchvision.utils.make_grid(x).cpu()
-            # recon = torchvision.utils.make_grid(x_recon).cpu()
-            # img = torch.concat((real, recon), dim=1)
-
-            def remove_pos_channels_from_batch(g):
-                n_pos_channels = 2  # if self.do_add_pos_encoding else 0
-                return g[:, :-n_pos_channels, :, :]
-
-            real_images = x[:N_TO_PLOT].repeat(self.num_steps, 1, 1, 1, 1)
-            # plot stepwise foveations on real images
-            h, w = real_images.shape[3:]
-
-            # # # # DEBUG: demo foveation to a specific location
-            # fig, (ax1, ax2) = plt.subplots(2)
-            # loc = torch.tensor([0.0, 0.0]).repeat(1, 1).to("mps")
-            # gaussian_filter_params = _recursive_to(
-            #     self._move_default_filter_params_to_loc(loc, (h, w), pad_offset=None),
-            #     "cpu",
-            # )
-            # plot_gaussian_foveation_parameters(
-            #                     x[[3]].cpu(),
-            #                     gaussian_filter_params,
-            #                     axs=[ax1],
-            #                     point_size=10,
-            #                 )
-            # fov = self._foveate_to_loc(self._add_pos_encodings_to_img_batch(x[[3]]), loc).cpu()
-            # imshow_unnorm(fov[0,[0]], ax=ax2)
-
-            # make figure with a column for each step and 3 rows:
-            # 1 for image with foveation, one for patch, one for patch reconstruction
-
-            figs = [plt.figure(figsize=(self.num_steps * 3, 12)) for _ in range(N_TO_PLOT)]
-            axs = [f.subplots(4, self.num_steps) for f in figs]
-
-            # plot foveations on images
-            for step, img_step_batch in enumerate(real_images):
-                # positions = (
-                #     patches[step]
-                #     .view(-1, self.num_channels, self.patch_dim, self.patch_dim)[:N_TO_PLOT, -2:]
-                #     .mean(dim=(2, 3))
-                # )
-                positions = step_patch_positions[step].to(self.device)
-                gaussian_filter_params = recursive_to(
-                    self._move_default_filter_params_to_loc(positions, (h, w), pad_offset=None),
-                    "cpu",
-                )
-                plot_gaussian_foveation_parameters(
-                    img_step_batch.cpu(),
-                    gaussian_filter_params,
-                    axs=[a[0][step] for a in axs],
-                    point_size=10,
-                )
-                for ax in [a[0][step] for a in axs]:
-                    ax.set_title(f"Foveation at step {step}", fontsize=8)
-
-            # plot patches
-            for step in range(self.num_steps):
-                step_patch_batch = remove_pos_channels_from_batch(
-                    patches[step][:N_TO_PLOT].view(
-                        -1, self.num_channels, self.patch_dim, self.patch_dim
-                    )
-                )
-                for i in range(N_TO_PLOT):
-                    imshow_unnorm(step_patch_batch[i].cpu(), ax=axs[i][1][step])
-                    axs[i][1][step].set_title(f"Patch at step {step}", fontsize=8)
-
-            # plot patch reconstructions
-            for step in range(self.num_steps):
-                step_patch_batch = remove_pos_channels_from_batch(
-                    step_sample_zs[step][0][:N_TO_PLOT].view(
-                        -1, self.num_channels, self.patch_dim, self.patch_dim
-                    )
-                )
-                for i in range(N_TO_PLOT):
-                    imshow_unnorm(step_patch_batch[i].cpu(), ax=axs[i][2][step])
-                    axs[i][2][step].set_title(f"Patch reconstruction at step {step}", fontsize=8)
-
-            # plot next patch predictions
-            if self.do_next_patch_prediction:
-                for step in range(self.num_steps):
-                    pred_patches = step_next_z_preds[step][0][:N_TO_PLOT].view(
-                        -1, self.num_channels, self.patch_dim, self.patch_dim
-                    )
-                    pred_pos = (
-                        pred_patches[:, -2:].mean(dim=(2, 3)) / 2 + 0.5
-                    ).cpu() * torch.tensor([h, w])
-                    pred_patches = remove_pos_channels_from_batch(pred_patches)
-                    for i in range(N_TO_PLOT):
-                        ax = axs[i][3][step]
-                        imshow_unnorm(pred_patches[i].cpu(), ax=ax)
-                        ax.set_title(
-                            f"Next patch pred. at step {step} - "
-                            f"({pred_pos[i][0]:.1f}, {pred_pos[i][1]:.1f})",
-                            fontsize=8,
-                        )
-                        # ax.text(
-                        #     -0.05,
-                        #     -0.05,
-                        #     f"(pred: {pred_pos[i][0]:.2f}, {pred_pos[i][1]:.2f})",
-                        #     color="white",
-                        #     fontsize=8,
-                        #     bbox=dict(facecolor="black", alpha=0.5),
-                        #     horizontalalignment="left",
-                        #     verticalalignment="top",
-                        # )
-
-            # add to tensorboard
-            for i, fig in enumerate(figs):
-                fig.tight_layout()
-
-            fov_vis = [fig_to_nparray(f) for f in figs]
-            self.logger.log_image(
-                key="Foveation Visualizations",
-                images=fov_vis,
+            # batch_size = x.size(0)
+            self.run_generalization_suite(
+                batch_size=16,
+                predict_foveation_path=False,
+                resize_pre=self.trainer.datamodule.resize,
             )
-
-            plt.close("all")
-
-            # if self.do_image_reconstruction:
-            _, reconstructed_images = self._reconstruct_image(
-                [[level[:N_TO_PLOT].to(self.device) for level in step] for step in step_sample_zs],
-                image=None,
-                return_patches=True,
-            )
-            reconstructed_images = reconstructed_images.cpu()
-
-            reconstructed_images = [
-                torchvision.utils.make_grid(
-                    remove_pos_channels_from_batch(self._patch_to_fovea(r)) / 2 + 0.5,
-                    nrow=int(np.sqrt(len(r))),
-                    padding=1,
-                )
-                for r in reconstructed_images
-            ]
-
-            self.logger.log_image(
-                key="Image Reconstructions",
-                images=reconstructed_images,
-            )
-
-            self.logger.log_image(
-                "Real Patches",
-                [
-                    torchvision.utils.make_grid(
-                        remove_pos_channels_from_batch(
-                            patches[0][:32].view(
-                                -1, self.num_channels, self.patch_dim, self.patch_dim
-                            )
-                            / 2
-                            + 0.5
-                        ).cpu(),
-                        nrow=8,
-                        padding=1,
-                    )
-                ],
-            )
-            self.logger.log_image(
-                "Reconstructed Patches",
-                [
-                    torchvision.utils.make_grid(
-                        remove_pos_channels_from_batch(
-                            step_sample_zs[0][0][:32].view(
-                                -1, self.num_channels, self.patch_dim, self.patch_dim
-                            )
-                            / 2
-                            + 0.5
-                        ).cpu(),
-                        nrow=8,
-                        padding=1,
-                    )
-                ],
-            )
-
-            def stack_traversal_output(g):
-                # stack by interp image, then squeeze out the singular batch dimension and
-                # index out the 2 position channels
-                return [
-                    remove_pos_channels_from_batch(torch.stack(dt).squeeze(1))
-                    for dt in traversal_abs
-                ]
-
-            # img = self._add_pos_encodings_to_img_batch(x[[0]])
-            # get top-level z of first step of first image of batch.
-            z_level = -1
-            first_step_zs = step_sample_zs[0][z_level][0].unsqueeze(0)
-            traversal_abs = self.latent_traverse(
-                first_step_zs, z_level=z_level, range_limit=3, step=0.5
-            )
-            images_by_row_and_interp = stack_traversal_output(traversal_abs)
-
-            self.logger.log_image(
-                "Absolute Latent Traversal",
-                [
-                    torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp),
-                        nrow=images_by_row_and_interp[0].size(0),
-                    )
-                ],
-            )
-            traversal_around = self.latent_traverse(
-                first_step_zs, z_level=z_level, range_limit=3, step=0.5, around_z=True
-            )
-            images_by_row_and_interp = stack_traversal_output(traversal_around)
-
-            self.logger.log_image(
-                "Latent Traversal Around Z",
-                [
-                    torchvision.utils.make_grid(
-                        torch.concat(images_by_row_and_interp),
-                        nrow=images_by_row_and_interp[0].size(0),
-                    ),
-                ],
-            )
-
-            del (
-                figs,
-                real_images,
-                axs,
-                reconstructed_images,
-                images_by_row_and_interp,
-                traversal_abs,
-                traversal_around,
-                step_patch_batch,
-            )
-            if self.do_next_patch_prediction:
-                del (pred_patches, pred_pos)
 
         # delete all variables involved
         del (
-            x,
-            y,
-            forward_out,
+            # x,
+            # y,
+            # forward_out,
             curr_patch_kl_divs_by_layer,
             _curr_kl_divs,
-            step_sample_zs,
-            step_next_z_preds,
-            patches,
-            step_patch_positions,
+            # step_sample_zs,
+            # step_next_z_preds,
+            # patches,
+            # step_patch_positions,
         )
 
         # print(gc.get_stats())
@@ -1453,6 +1201,100 @@ class FoVAE(pl.LightningModule):
 
         del self._epoch_curr_patch_kl_history
         del self._epoch_npp_kl_history
+
+    def run_generalization_suite(
+        self,
+        # dataset_name: Literal["mnist", "omniglot"],
+        # transform_name: Literal["none", "translate", "scale"],
+        batch_size=16,
+        resize_pre=False,
+        predict_foveation_path: bool = False,
+    ):
+        """Run a suite of generalization tests on the model.
+
+        datasets: MNIST, Omniglot
+        transforms: none, translate, scale
+        predict foveation path
+        """
+        # datasets: MNIST, Omniglot
+        # transforms: none, translate, scale
+        # predict foveation path
+
+        for dataset_name in ["mnist", "omniglot"]:
+            dataset = ImageDataModule(
+                dataset=dataset_name, batch_size=batch_size, resize=resize_pre
+            )
+            dataset.prepare_data()
+            dataset.setup("validate")
+
+            dataloader = dataset.val_dataloader()
+
+            x, _ = next(iter(dataloader))
+
+            for transform_name in ["none", "translate", "scale"]:
+                # TODO: can't fill with min value for CIFAR and ImageNet
+                if transform_name == "translate":
+                    transform = v2.RandomAffine(degrees=0, translate=(0.5, 0.5), fill=x.min().item())
+                elif transform_name == "scale":
+                    transform = v2.RandomAffine(degrees=0, scale=(0.25, 2), fill=x.min().item())
+                else:
+
+                    def transform(x):
+                        return x
+
+                x_transformed = torch.stack([transform(_x) for _x in x]).to(self.device)
+
+                forward_out = self(x_transformed, None)
+
+                vis_outputs = visualize_model_output(
+                    self,
+                    x_transformed,
+                    forward_out,
+                    n_to_plot=4,
+                )
+
+                # TODO: predict foveation path
+
+                if dataset_name == self.trainer.datamodule.dataset_name:
+                    suffix = "/ID"
+                else:
+                    suffix = "/OOD"
+
+                if transform_name == "none":
+                    suffix += " (NT)"
+                elif transform_name == "translate":
+                    suffix += " (T)"
+                elif transform_name == "scale":
+                    suffix += " (S)"
+
+                self.logger.log_image(
+                    key="Real images" + suffix,
+                    images=[vis_outputs["real_images"]],
+                )
+                self.logger.log_image(
+                    key="Foveation Visualizations" + suffix,
+                    images=vis_outputs["fov_vis"],
+                )
+                self.logger.log_image(
+                    key="Image Reconstructions" + suffix,
+                    images=vis_outputs["reconstructed_images"],
+                )
+                self.logger.log_image(
+                    key="Real Patches" + suffix,
+                    images=[vis_outputs["real_patches_grid"]]
+                )
+                self.logger.log_image(
+                    key="Reconstructed Patches" + suffix,
+                    images=[vis_outputs["reconstructed_patches_grid"]],
+                )
+                self.logger.log_image(
+                    key="Absolute Latent Traversal" + suffix,
+                    images=[vis_outputs["abs_latent_traversal_grid"]],
+                )
+                self.logger.log_image(
+                    key="Latent Traversal Around Z" + suffix,
+                    images=[vis_outputs["around_latent_traversal_grid"]],
+                )
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
