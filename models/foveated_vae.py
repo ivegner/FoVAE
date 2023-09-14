@@ -73,6 +73,8 @@ class FoVAE(pl.LightningModule):
         ),
         free_bits_kl=0,
         soft_foveation_grid_size=None,
+        soft_foveation_sigma=0.1,
+        soft_foveation_local_bias=1000,
         do_soft_foveation=False,
         # n_spectral_iter=1,
         grad_skip_threshold=-1,
@@ -211,12 +213,12 @@ class FoVAE(pl.LightningModule):
         self.do_soft_foveation = do_soft_foveation
         if do_soft_foveation:
             self.soft_foveation_grid_size = soft_foveation_grid_size
-            self.soft_foveation_sigma = nn.Parameter(
-                torch.tensor([0.1]), requires_grad=False
-            )  # TODO
-            self.soft_foveation_local_bias = nn.Parameter(
-                torch.tensor([1000.0]), requires_grad=False
-            )  # TODO
+            self.soft_foveation_sigma = soft_foveation_sigma # nn.Parameter(
+            #     torch.tensor([0.1]), requires_grad=False
+            # )  # TODO
+            self.soft_foveation_local_bias = soft_foveation_local_bias # nn.Parameter(
+            #     torch.tensor([1000.0]), requires_grad=False
+            # )  # TODO
 
         # Disable automatic optimization!
         # self.automatic_optimization = False
