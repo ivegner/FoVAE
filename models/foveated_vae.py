@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch.nn.init as init
 import torchvision
 from torch import nn, optim
+
 torchvision.disable_beta_transforms_warning()
 from torchvision.transforms import v2
 
@@ -21,12 +22,19 @@ import utils.foveation as fov_utils
 from data import ImageDataModule
 from modules.lvae import Ladder, LadderVAE, NextPatchPredictor
 from utils.misc import recursive_detach, recursive_to
-from utils.vae_utils import (free_bits_kl, gaussian_kl_divergence,
-                             gaussian_likelihood, reparam_sample)
-from utils.visualization import (fig_to_nparray, imshow_unnorm,
-                                 plot_gaussian_foveation_parameters,
-                                 plot_layer_kl_history_by_dim,
-                                 visualize_model_output)
+from utils.vae_utils import (
+    free_bits_kl,
+    gaussian_kl_divergence,
+    gaussian_likelihood,
+    reparam_sample,
+)
+from utils.visualization import (
+    fig_to_nparray,
+    imshow_unnorm,
+    plot_gaussian_foveation_parameters,
+    plot_layer_kl_history_by_dim,
+    visualize_model_output,
+)
 
 # from memory_profiler import profile
 plt.ioff()
@@ -852,9 +860,8 @@ class FoVAE(pl.LightningModule):
         assert len(image_dim) == 2, f"image_dim must be (h, w), got {image_dim}"
         image_dim = torch.tensor(image_dim, dtype=loc.dtype, device=loc.device)
 
-        assert (
-            -1 <= loc.min() and loc.max() <= 1
-        ), f"loc must be in [-1, 1], got {loc.min()} to {loc.max()}"
+        if loc.min() < -1 or loc.max() > 1:
+            print(f"loc must be in [-1, 1], got {loc.min()} to {loc.max()}")
 
         if pad_offset is None:
             pad_offset = [0, 0]
@@ -1234,7 +1241,9 @@ class FoVAE(pl.LightningModule):
             for transform_name in ["none", "translate", "scale"]:
                 # TODO: can't fill with min value for CIFAR and ImageNet
                 if transform_name == "translate":
-                    transform = v2.RandomAffine(degrees=0, translate=(0.5, 0.5), fill=x.min().item())
+                    transform = v2.RandomAffine(
+                        degrees=0, translate=(0.5, 0.5), fill=x.min().item()
+                    )
                 elif transform_name == "scale":
                     transform = v2.RandomAffine(degrees=0, scale=(0.25, 2), fill=x.min().item())
                 else:
@@ -1280,8 +1289,7 @@ class FoVAE(pl.LightningModule):
                     images=vis_outputs["reconstructed_images"],
                 )
                 self.logger.log_image(
-                    key="Real Patches" + suffix,
-                    images=[vis_outputs["real_patches_grid"]]
+                    key="Real Patches" + suffix, images=[vis_outputs["real_patches_grid"]]
                 )
                 self.logger.log_image(
                     key="Reconstructed Patches" + suffix,
