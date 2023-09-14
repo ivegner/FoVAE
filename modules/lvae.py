@@ -348,7 +348,7 @@ class NextPatchPredictor(nn.Module):
         num_heads: int = 1,
         num_layers: int = 3,
         do_lateral_connections: bool = True,
-        do_sigmoid_next_location: bool = False,
+        do_sigmoid_next_location: bool = True,
         do_flag_last_step: bool = False,
     ):
         super().__init__()
