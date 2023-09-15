@@ -1431,7 +1431,7 @@ class FoVAE(pl.LightningModule):
         # delete stale W&B files (otherwise they clog up the tempdir)
         if self.trainer.global_rank == 0:
             # delete all pngs in MEDIA_TMP older than 30 min ago
-            for f in os.listdir(MEDIA_TMP):
+            for f in os.listdir(MEDIA_TMP.name):
                 if f.endswith(".png"):
                     f = os.path.join(MEDIA_TMP, f)
                     if time.time() - os.path.getmtime(f) > 30 * 60:
