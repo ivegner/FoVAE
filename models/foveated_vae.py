@@ -1,5 +1,7 @@
 import gc
 from copy import deepcopy
+import os
+import time
 from timeit import default_timer as timer
 from typing import Any, Iterable, List, Literal, Optional, Tuple, Union
 
@@ -16,7 +18,7 @@ torchvision.disable_beta_transforms_warning()
 from torchvision.transforms import v2
 
 import wandb
-
+from wandb.sdk.data_types.image import MEDIA_TMP
 
 import utils.foveation as fov_utils
 from data import ImageDataModule
@@ -213,7 +215,7 @@ class FoVAE(pl.LightningModule):
         self.do_soft_foveation = do_soft_foveation
         if do_soft_foveation:
             self.soft_foveation_grid_size = soft_foveation_grid_size
-            self.soft_foveation_sigma =  nn.Parameter(
+            self.soft_foveation_sigma = nn.Parameter(
                 torch.tensor([soft_foveation_sigma]), requires_grad=False
             )
             self.soft_foveation_local_bias = nn.Parameter(
@@ -1425,6 +1427,16 @@ class FoVAE(pl.LightningModule):
     def on_train_epoch_end(self) -> None:
         k = super().on_train_epoch_end()
         gc.collect()
+
+        # delete stale W&B files (otherwise they clog up the tempdir)
+        if self.trainer.global_rank == 0:
+            # delete all pngs in MEDIA_TMP older than 30 min ago
+            for f in os.listdir(MEDIA_TMP):
+                if f.endswith(".png"):
+                    f = os.path.join(MEDIA_TMP, f)
+                    if time.time() - os.path.getmtime(f) > 30 * 60:
+                        os.remove(f)
+
         return k
 
     #     # skip updates with nans
