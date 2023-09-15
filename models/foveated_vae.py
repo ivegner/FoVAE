@@ -216,10 +216,10 @@ class FoVAE(pl.LightningModule):
         if do_soft_foveation:
             self.soft_foveation_grid_size = soft_foveation_grid_size
             self.soft_foveation_sigma = nn.Parameter(
-                torch.tensor([soft_foveation_sigma]), requires_grad=False
+                torch.tensor([soft_foveation_sigma]), requires_grad=True
             )
             self.soft_foveation_local_bias = nn.Parameter(
-                torch.tensor([soft_foveation_local_bias]), requires_grad=False
+                torch.tensor([soft_foveation_local_bias]), requires_grad=True
             )
 
         # Disable automatic optimization!
@@ -265,7 +265,9 @@ class FoVAE(pl.LightningModule):
             def get_patch_from_pos(pos):
                 # TODO: investigate why reshape vs. view is needed
                 nonlocal _fov_memo
-                patch, _fov_memo = self._foveate_to_loc(x_full, pos, _fov_memo=_fov_memo)
+                patch, _fov_memo = self._foveate_to_loc(
+                    x_full, pos, do_soft_foveation=self.do_soft_foveation, _fov_memo=_fov_memo
+                )
                 patch = patch.reshape(b, -1)
                 assert patch.shape == (b, self.num_channels * self.patch_dim * self.patch_dim)
                 if return_full_periphery:
@@ -654,7 +656,11 @@ class FoVAE(pl.LightningModule):
 
             def get_patch_from_pos(pos):
                 nonlocal _fov_memo
-                patch, _fov_memo = self._foveate_to_loc(image, pos, _fov_memo=_fov_memo)
+                # disable soft foveation for getting real patches to reconstruct,
+                # regardless of whether the model is using soft-foveation
+                patch, _fov_memo = self._foveate_to_loc(
+                    image, pos, do_soft_foveation=False, _fov_memo=_fov_memo
+                )
                 return patch
 
             return get_patch_from_pos
@@ -705,7 +711,9 @@ class FoVAE(pl.LightningModule):
         else:
             return image_recon_loss, None
 
-    def _foveate_to_loc(self, image: torch.Tensor, loc: torch.Tensor, _fov_memo: dict = None):
+    def _foveate_to_loc(
+        self, image: torch.Tensor, loc: torch.Tensor, do_soft_foveation=None, _fov_memo: dict = None
+    ):
         # image: (b, c, h, w)
         # loc: (b, 2), where entries are in [-1, 1]
         # filters: (out_h, out_w, rf_h, rf_w)
@@ -754,7 +762,7 @@ class FoVAE(pl.LightningModule):
             else:
                 padded_image = image
 
-        if self.do_soft_foveation:
+        if do_soft_foveation:
             if _fov_memo and "soft_patches" in _fov_memo:
                 soft_patches = _fov_memo["soft_patches"]
                 all_locs = _fov_memo["all_locs"]
@@ -844,7 +852,7 @@ class FoVAE(pl.LightningModule):
         _fov_memo["orig_image"] = image
         _fov_memo["padded_image"] = padded_image
         _fov_memo["pad_offset"] = pad_offset
-        if self.do_soft_foveation:
+        if do_soft_foveation:
             _fov_memo["soft_patches"] = soft_patches
             _fov_memo["all_locs"] = all_locs
             _fov_memo["channel_mask"] = channel_mask
