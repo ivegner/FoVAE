@@ -42,7 +42,7 @@ model:
   do_soft_foveation: false
   soft_foveation_grid_size: null
   soft_foveation_sigma: 0.1
-  soft_foveation_local_bias: 1000
+  soft_foveation_local_bias: 1000.0
   do_image_reconstruction: true
   do_next_patch_prediction: true
   reconstruct_fovea_only: false

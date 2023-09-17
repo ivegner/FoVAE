@@ -76,7 +76,7 @@ class FoVAE(pl.LightningModule):
         free_bits_kl=0,
         soft_foveation_grid_size=None,
         soft_foveation_sigma=0.1,
-        soft_foveation_local_bias=1000,
+        soft_foveation_local_bias=1000.0,
         do_soft_foveation=False,
         # n_spectral_iter=1,
         grad_skip_threshold=-1,
@@ -216,10 +216,10 @@ class FoVAE(pl.LightningModule):
         if do_soft_foveation:
             self.soft_foveation_grid_size = soft_foveation_grid_size
             self.soft_foveation_sigma = nn.Parameter(
-                torch.tensor([soft_foveation_sigma]), requires_grad=True
+                torch.tensor([soft_foveation_sigma]).float(), requires_grad=True
             )
             self.soft_foveation_local_bias = nn.Parameter(
-                torch.tensor([soft_foveation_local_bias]), requires_grad=True
+                torch.tensor([soft_foveation_local_bias]).float(), requires_grad=True
             )
 
         # Disable automatic optimization!
@@ -1087,6 +1087,7 @@ class FoVAE(pl.LightningModule):
         forward_out = self.forward(x, y)
         # total_loss = forward_out["losses"].pop("total_loss")
         total_loss = forward_out["losses"]["total_loss"]
+        print("Rec loss", forward_out["losses"]["image_reconstruction_loss"])
         # self.log("train_total_loss", total_loss, prog_bar=True)
         self.log_dict({"train/" + k: v.detach().item() for k, v in forward_out["losses"].items()})
         # patch_noise_std_mean = self.patch_noise_std.detach().mean().item()
