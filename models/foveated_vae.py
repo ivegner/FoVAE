@@ -1087,7 +1087,7 @@ class FoVAE(pl.LightningModule):
         forward_out = self.forward(x, y)
         # total_loss = forward_out["losses"].pop("total_loss")
         total_loss = forward_out["losses"]["total_loss"]
-        print("Rec loss", forward_out["losses"]["image_reconstruction_loss"])
+        # print("Rec loss", forward_out["losses"]["image_reconstruction_loss"])
         # self.log("train_total_loss", total_loss, prog_bar=True)
         self.log_dict({"train/" + k: v.detach().item() for k, v in forward_out["losses"].items()})
         # patch_noise_std_mean = self.patch_noise_std.detach().mean().item()
