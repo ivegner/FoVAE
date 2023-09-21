@@ -299,7 +299,9 @@ def _visualize_foveations(
 
         positions = torch.cat(
             (fov_locations_x.unsqueeze(-1), fov_locations_y.unsqueeze(-1)), dim=-1
-        ).to(model.device)[step]
+        ).to(model.device)
+
+        positions = (positions[step] / h) * 2 - 1
 
         # positions = step_patch_positions[step].to(model.device)
         gaussian_filter_params = recursive_to(
