@@ -379,3 +379,23 @@ def _visualize_foveations(
     # )
     # if model.do_next_patch_prediction:
     #     del (pred_patches, pred_pos)
+
+def plot_heatmap(x: np.ndarray, ax=None, item_labels: bool = True, title=None):
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.get_figure()
+    ax.imshow(x, cmap="Blues")
+    ax.set_xticks(np.arange(x.shape[1]))
+    ax.set_yticks(np.arange(x.shape[0]))
+    ax.set_xticklabels(np.arange(x.shape[1]))
+    ax.set_yticklabels(np.arange(x.shape[0]))
+    if title:
+        ax.set_title(title)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    if item_labels:
+        for i in range(x.shape[0]):
+            for j in range(x.shape[1]):
+                ax.text(j, i, f"{x[i, j]:.4f}", ha="center", va="center", color="w", fontsize=6)
+    fig.tight_layout()
+    return fig, ax

@@ -1,3 +1,4 @@
+from collections import defaultdict
 import gc
 from copy import deepcopy
 import os
@@ -36,6 +37,7 @@ from utils.visualization import (
     plot_gaussian_foveation_parameters,
     plot_layer_kl_history_by_dim,
     visualize_model_output,
+    plot_heatmap,
 )
 
 # from memory_profiler import profile
@@ -1049,7 +1051,7 @@ class FoVAE(pl.LightningModule):
         ring_radius = self.patch_dim // 2 - self.fovea_radius
         fovea_dim = self.fovea_radius * 2
 
-        fovea = p[:, :, ring_radius:(-ring_radius or None), ring_radius:(-ring_radius or None)]
+        fovea = p[:, :, ring_radius : (-ring_radius or None), ring_radius : (-ring_radius or None)]
         if patch.ndim == 2:
             return fovea.reshape(-1, self.num_channels * fovea_dim * fovea_dim)
         else:
@@ -1169,6 +1171,18 @@ class FoVAE(pl.LightningModule):
                 resize_pre=self.trainer.datamodule.resize,
             )
 
+        fov_locations = torch.stack(
+            forward_out["step_vars"]["patch_positions"], dim=0
+        ).cpu()  # (n_steps, b, 2)
+        fov_locations = fov_locations.permute(1, 0, 2)  # (b, n_steps, 2)
+
+        if not hasattr(self, "_epoch_fov_locations"):
+            self._epoch_fov_locations = fov_locations
+            self._epoch_labels = y.cpu()
+        else:
+            self._epoch_fov_locations = torch.cat((self._epoch_fov_locations, fov_locations), dim=0)
+            self._epoch_labels = torch.cat((self._epoch_labels, y.cpu()), dim=0)
+
         # delete all variables involved
         del (
             # x,
@@ -1226,8 +1240,76 @@ class FoVAE(pl.LightningModule):
             )
             self.logger.log_image("npp_kl_history", [_fig])
 
-        del self._epoch_curr_patch_kl_history
-        del self._epoch_npp_kl_history
+        ### plot foveation behavior
+        # plot average foveation locations
+        fov_locations = self._epoch_fov_locations
+        labels = self._epoch_labels
+        # plot heatmap of foveation locations
+        locations_transformed = (fov_locations + 1) / 2
+        locations_transformed *= self.image_dim
+        # locations_transformed = (
+        #     torch.round(locations_transformed).long().clamp(0, self.image_dim - 1)
+        # )
+
+        def _plot_locations(locs, ax=None, title=None):
+            # locs: (b, n_steps, 2)
+            if ax is None:
+                fig, ax = plt.subplots()
+            else:
+                fig = ax.get_figure()
+
+            for i in range(locs.size(1)):
+                color = plt.cm.rainbow(i / locs.size(1))
+                ax.scatter(
+                    locs[:, i, 0], locs[:, i, 1], s=1, alpha=min(1, 200 / len(locs)), color=color
+                )
+            ax.set_xlim(0, self.image_dim - 1)
+            ax.set_ylim(0, self.image_dim - 1)
+            ax.set_aspect("equal")
+            if title:
+                ax.set_title(title)
+            return fig, ax
+
+        fig, ax = _plot_locations(locations_transformed, title="Foveation Locations (all labels)")
+        fig.tight_layout()
+        _fig = fig_to_nparray(fig)
+        self.logger.log_image("foveation_locations", [_fig])
+
+        # heatmap = torch.zeros((self.image_dim, self.image_dim))
+        # for i in range(locations_transformed.size(0)):
+        #     heatmap[locations_transformed[i, 1:, 0], locations_transformed[i, 1:, 1]] += 1
+        # heatmap /= heatmap.sum()
+        # heatmap = heatmap.numpy()
+        # _fig = fig_to_nparray(fig)
+        # self.logger.log_image("foveation_heatmap", [_fig])
+
+        # group by label
+        d = defaultdict(list)
+        for label, loc in zip(labels, locations_transformed):
+            d[label.item()].append(loc)
+
+        # plot average foveation locations by 10 random labels
+        labels_to_plot = np.random.choice(list(d.keys()), 10, replace=False)
+        # make 5x2 grid of plots
+        fig, axes = plt.subplots(2, 5, figsize=(20, 10))
+        for ax, label in zip(axes.flatten(), labels_to_plot):
+            avg_x_for_label = torch.stack(
+                [x[0] for x in self.trainer.datamodule.dataset_val if x[1] == label]
+            ).mean(dim=0)
+            locs = torch.stack(d[label])
+            _plot_locations(locs, ax=ax, title=f"Label {label}")
+            ax.imshow(avg_x_for_label.permute(1, 2, 0).cpu().numpy(), cmap="gray")
+
+        fig.tight_layout()
+        _fig = fig_to_nparray(fig)
+        self.logger.log_image("foveation_heatmap_by_label", [_fig])
+
+        del (
+            self._epoch_curr_patch_kl_history,
+            self._epoch_npp_kl_history,
+            self._epoch_fov_locations,
+            self._epoch_labels,
+        )
 
     def run_generalization_suite(
         self,
