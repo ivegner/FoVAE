@@ -1226,13 +1226,13 @@ class FoVAE(pl.LightningModule):
             for i, v in enumerate(next_patch_kl_divs_by_layer):
                 self._epoch_npp_kl_history[i].append(v.detach().cpu().numpy())
 
-        # if batch_idx == 0:
-        #     # batch_size = x.size(0)
-        #     self.run_generalization_suite(
-        #         batch_size=16,
-        #         predict_foveation_path=False,
-        #         resize_pre=self.trainer.datamodule.resize,
-        #     )
+        if batch_idx == 0:
+            # batch_size = x.size(0)
+            self.run_generalization_suite(
+                batch_size=16,
+                predict_foveation_path=False,
+                resize_pre=self.trainer.datamodule.resize,
+            )
 
         fov_locations_x = torch.stack([g[0].argmax(dim=-1) for g in forward_out["step_vars"]["patch_positions"]], dim=0).cpu()
         fov_locations_y = torch.stack([g[1].argmax(dim=-1) for g in forward_out["step_vars"]["patch_positions"]], dim=0).cpu()
