@@ -147,6 +147,7 @@ class FoVAE(pl.LightningModule):
             gen_skip_connection=do_gen_skip_connection,
         )
         self.next_patch_predictor = NextPatchPredictor(
+            image_dim=image_dim,
             ladder_vae=self.ladder_vae,
             z_dims=z_dims,
             embed_dim=npp_embed_dim,
@@ -264,11 +265,15 @@ class FoVAE(pl.LightningModule):
         def memoized_patch_getter(x_full, return_full_periphery=False):
             _fov_memo = None
 
-            def get_patch_from_pos(pos):
+            def get_patch_from_pos(next_pos_x_dist, next_pos_y_dist):
                 # TODO: investigate why reshape vs. view is needed
                 nonlocal _fov_memo
                 patch, _fov_memo = self._foveate_to_loc(
-                    x_full, pos, do_soft_foveation=self.do_soft_foveation, _fov_memo=_fov_memo
+                    x_full,
+                    next_pos_x_dist,
+                    next_pos_y_dist,
+                    do_soft_foveation=self.do_soft_foveation,
+                    _fov_memo=_fov_memo,
                 )
                 patch = patch.reshape(b, -1)
                 assert patch.shape == (b, self.num_channels * self.patch_dim * self.patch_dim)
@@ -281,9 +286,13 @@ class FoVAE(pl.LightningModule):
 
         get_patch_from_pos = memoized_patch_getter(x_full)
 
-        initial_positions = torch.tensor([0.0, 0.0], device=x.device).unsqueeze(0).repeat(b, 1)
-        patches = [get_patch_from_pos(initial_positions)]
-        patch_positions = [initial_positions]
+        initial_x_pos_dist = torch.zeros((b, self.image_dim), device=x.device)
+        initial_x_pos_dist[:, self.image_dim // 2] = 1.0
+        initial_y_pos_dist = torch.zeros((b, self.image_dim), device=x.device)
+        initial_y_pos_dist[:, self.image_dim // 2] = 1.0
+        # initial_positions = torch.tensor([0.0, 0.0], device=x.device).unsqueeze(0).repeat(b, 1)
+        patches = [get_patch_from_pos(initial_x_pos_dist, initial_y_pos_dist)]
+        patch_positions = [(initial_x_pos_dist, initial_y_pos_dist)]
 
         real_patch_zs = []
         real_patch_dicts = []
@@ -329,10 +338,11 @@ class FoVAE(pl.LightningModule):
                 gen_patch_zs.append(next_patch_dict["generation"]["sample_zs"])
                 gen_patch_dicts.append(next_patch_dict)
 
-                next_pos = next_patch_dict["position"]["next_pos"]
+                next_pos_x_dist = next_patch_dict["position"]["next_pos_x_dist"]
+                next_pos_y_dist = next_patch_dict["position"]["next_pos_y_dist"]
                 # next_pos_offset = next_patch_dict["position"]["next_pos"]
             elif self.frac_random_foveation == 1.0:
-                next_pos = self._get_random_foveation_pos(batch_size=b)
+                next_pos_x_dist, next_pos_y_dist = self._get_random_foveation_pos(batch_size=b)
                 # next_pos_offset = self._get_random_foveation_pos(batch_size=b)
             else:
                 raise ValueError(
@@ -344,14 +354,14 @@ class FoVAE(pl.LightningModule):
             #     # sigmoid to keep positions in range [-1, 1]
             #     next_pos = torch.sigmoid(next_pos) * 2 - 1
 
-            # foveate to next position
-            if torch.isnan(next_pos).any():
-                next_pos = torch.nan_to_num(next_pos, nan=0.0, posinf=0.0, neginf=0.0)
+            # # foveate to next position
+            # if torch.isnan(next_pos).any():
+            #     next_pos = torch.nan_to_num(next_pos, nan=0.0, posinf=0.0, neginf=0.0)
 
-            next_patch = get_patch_from_pos(next_pos)
+            next_patch = get_patch_from_pos(next_pos_x_dist, next_pos_y_dist)
             assert torch.is_same_size(next_patch, curr_patch)
             patches.append(next_patch)
-            patch_positions.append(next_pos)
+            patch_positions.append((next_pos_x_dist, next_pos_y_dist))
 
             # calculate losses
 
@@ -382,11 +392,11 @@ class FoVAE(pl.LightningModule):
             # only do kl divergence because
             # reconstruction of next_pos is captured in next_patch_rec_loss
             _next_patch_pos_kl_div = 0.0
-            if self.frac_random_foveation < 1.0:
-                _next_patch_pos_kl_div = self._kl_divergence(
-                    mu=next_patch_dict["position"]["next_pos_mu"],
-                    std=next_patch_dict["position"]["next_pos_std"],
-                ).sum(-1)
+            # if self.frac_random_foveation < 1.0:
+            #     _next_patch_pos_kl_div = self._kl_divergence(
+            #         mu=next_patch_dict["position"]["next_pos_mu"],
+            #         std=next_patch_dict["position"]["next_pos_std"],
+            #     ).sum(-1)
             next_patch_pos_kl_div_total_loss += _next_patch_pos_kl_div
 
             # if any previous predicted patch, calculate loss between
@@ -629,7 +639,9 @@ class FoVAE(pl.LightningModule):
         )
 
     def _get_random_foveation_pos(self, batch_size: int):
-        return self.next_patch_predictor._get_random_foveation_pos(batch_size, device=self.device)
+        x = self.next_patch_predictor._get_random_foveation_pos(batch_size, device=self.device)
+        y = self.next_patch_predictor._get_random_foveation_pos(batch_size, device=self.device)
+        return x, y
 
     def _reconstruct_image(
         self,
@@ -670,8 +682,9 @@ class FoVAE(pl.LightningModule):
                 nonlocal _fov_memo
                 # disable soft foveation for getting real patches to reconstruct,
                 # regardless of whether the model is using soft-foveation
+                next_pos_x_dist, next_pos_y_dist = self._get_dummy_dist_for_pos(pos)
                 patch, _fov_memo = self._foveate_to_loc(
-                    image, pos, do_soft_foveation=False, _fov_memo=_fov_memo
+                    image, next_pos_x_dist, next_pos_y_dist, do_soft_foveation=False, _fov_memo=_fov_memo
                 )
                 return patch
 
@@ -724,7 +737,12 @@ class FoVAE(pl.LightningModule):
             return image_recon_loss, None
 
     def _foveate_to_loc(
-        self, image: torch.Tensor, loc: torch.Tensor, do_soft_foveation=None, _fov_memo: dict = None
+        self,
+        image: torch.Tensor,
+        next_pos_x_dist: torch.Tensor,
+        next_pos_y_dist: torch.Tensor,
+        do_soft_foveation=None,
+        _fov_memo: dict = None,
     ):
         # image: (b, c, h, w)
         # loc: (b, 2), where entries are in [-1, 1]
@@ -774,7 +792,7 @@ class FoVAE(pl.LightningModule):
             else:
                 padded_image = image
 
-        if do_soft_foveation:
+        if True:  # do_soft_foveation:
             if _fov_memo and "soft_patches" in _fov_memo:
                 soft_patches = _fov_memo["soft_patches"]
                 all_locs = _fov_memo["all_locs"]
@@ -782,10 +800,17 @@ class FoVAE(pl.LightningModule):
                 # build patches for all possible locations
                 # build grid of locations spanning (-1, 1) in both dims
                 # (out_h, out_w, 2)
+                # all_locs = torch.stack(
+                #     torch.meshgrid(
+                #         torch.linspace(-1, 1, self.soft_foveation_grid_size),
+                #         torch.linspace(-1, 1, self.soft_foveation_grid_size),
+                #     ),
+                #     dim=-1,
+                # ).to(self.device)
                 all_locs = torch.stack(
                     torch.meshgrid(
-                        torch.linspace(-1, 1, self.soft_foveation_grid_size),
-                        torch.linspace(-1, 1, self.soft_foveation_grid_size),
+                        torch.linspace(-1, 1, self.image_dim),
+                        torch.linspace(-1, 1, self.image_dim),
                     ),
                     dim=-1,
                 ).to(self.device)
@@ -804,50 +829,58 @@ class FoVAE(pl.LightningModule):
                 # (out_h * out_w, b, c, h, w) -> (b, out_h * out_w, c, h, w)
                 soft_patches = torch.stack(soft_patches, dim=0).transpose(0, 1)
 
-            # soft attention over soft_patches based on position encodings (loc vs. last 2 dimensions of c)
-            # loc: (b, 2)
-            # soft_patches: (b, out_h*out_w, c, h, w)
+            # # soft attention over soft_patches based on position encodings (loc vs. last 2 dimensions of c)
+            # # loc: (b, 2)
+            # # soft_patches: (b, out_h*out_w, c, h, w)
+            # # foveated_image: (b, c, h, w)
+            # _loc = (
+            #     torch.cat(
+            #         (
+            #             torch.zeros((b, self.num_channels - 2), device=self.device),
+            #             loc,
+            #         ),
+            #         dim=-1,
+            #     )
+            #     .view(b, c, 1, 1)
+            #     .expand(b, c, self.patch_dim, self.patch_dim)
+            # )
+
+            # # mask out all channels except the last 2 (position)
+            # if _fov_memo and "channel_mask" in _fov_memo:
+            #     channel_mask = _fov_memo["channel_mask"]
+            # else:
+            #     channel_mask = torch.zeros((1, self.num_channels, 1, 1), device=self.device)
+            #     channel_mask[:, -2:, :, :] = 1.0
+
+            # # make gaussian attention mask over all_locs, centered at loc
+            # # TODO: soft_foveation_sigma
+            # gaussian_mask = (
+            #     F.softmax(
+            #         torch.exp(
+            #             -torch.sum((all_locs - loc.unsqueeze(0)) ** 2, dim=-1)
+            #             / (2 * self.soft_foveation_sigma**2)
+            #         ),
+            #         dim=0,
+            #     )
+            #     .transpose(0, 1)
+            #     .unsqueeze(1)
+            # )
+
+            # soft attention over soft_patches
+            # soft_patches: (b, image_dim*image_dim, c, h, w)
             # foveated_image: (b, c, h, w)
-            _loc = (
-                torch.cat(
-                    (
-                        torch.zeros((b, self.num_channels - 2), device=self.device),
-                        loc,
-                    ),
-                    dim=-1,
-                )
-                .view(b, c, 1, 1)
-                .expand(b, c, self.patch_dim, self.patch_dim)
-            )
+            # weights given by cross product of x and y distributions
+            weights = (next_pos_x_dist.unsqueeze(1) * next_pos_y_dist.unsqueeze(2)).view(b, -1)
+            assert weights.size() == torch.Size([b, self.image_dim * self.image_dim])
+            foveated_image = torch.einsum("bg,bgchw->bchw", weights, soft_patches)
 
-            # mask out all channels except the last 2 (position)
-            if _fov_memo and "channel_mask" in _fov_memo:
-                channel_mask = _fov_memo["channel_mask"]
-            else:
-                channel_mask = torch.zeros((1, self.num_channels, 1, 1), device=self.device)
-                channel_mask[:, -2:, :, :] = 1.0
-
-            # make gaussian attention mask over all_locs, centered at loc
-            # TODO: soft_foveation_sigma
-            gaussian_mask = (
-                F.softmax(
-                    torch.exp(
-                        -torch.sum((all_locs - loc.unsqueeze(0)) ** 2, dim=-1)
-                        / (2 * self.soft_foveation_sigma**2)
-                    ),
-                    dim=0,
-                )
-                .transpose(0, 1)
-                .unsqueeze(1)
-            )
-
-            embed_dim = c * self.patch_dim * self.patch_dim
-            foveated_image = F.scaled_dot_product_attention(
-                (_loc * channel_mask).view(b, 1, embed_dim),
-                (soft_patches * channel_mask.unsqueeze(1)).view(b, -1, embed_dim),
-                soft_patches.view(b, -1, embed_dim),
-                attn_mask=gaussian_mask * self.soft_foveation_local_bias,
-            )
+            # embed_dim = c * self.patch_dim * self.patch_dim
+            # foveated_image = F.scaled_dot_product_attention(
+            #     (_loc * channel_mask).view(b, 1, embed_dim),
+            #     (soft_patches * channel_mask.unsqueeze(1)).view(b, -1, embed_dim),
+            #     soft_patches.view(b, -1, embed_dim),
+            #     attn_mask=gaussian_mask * self.soft_foveation_local_bias,
+            # )
             foveated_image = foveated_image.view(b, c, self.patch_dim, self.patch_dim)
 
         else:
@@ -867,7 +900,7 @@ class FoVAE(pl.LightningModule):
         if do_soft_foveation:
             _fov_memo["soft_patches"] = soft_patches
             _fov_memo["all_locs"] = all_locs
-            _fov_memo["channel_mask"] = channel_mask
+            # _fov_memo["channel_mask"] = channel_mask
 
         if foveated_image.isnan().any():
             raise ValueError("NaNs in foveated image!")
@@ -934,14 +967,41 @@ class FoVAE(pl.LightningModule):
         # curr_patch_ladder_outputs: list(n_levels from lowest to highest) of tensors (b, d)
         # next_patch_pos: Tensor (b, 2)
         # highest-level z is the last element of the list
+        b = prev_zs[0][0].size(0)
+
+        if forced_next_location is not None:
+            forced_next_pos_x_dist, forced_next_pos_y_dist = self._get_dummy_dist_for_pos(forced_next_location)
+        else:
+            forced_next_pos_x_dist, forced_next_pos_y_dist = None, None
+
+        # randomize next location for those that are masked to true in randomize_next_location
+        # TODO: move out of here
+        # if randomize_next_location is not None:
+        #     next_pos_rand = self._get_random_foveation_pos(b, device=device)
+        #     next_pos = torch.where(randomize_next_location[:, None], next_pos_rand, next_pos)
 
         return self.next_patch_predictor(
             prev_zs,
             curr_patch_ladder_outputs=curr_patch_ladder_outputs,
-            forced_next_location=forced_next_location,
+            forced_next_location_x_dist=forced_next_pos_x_dist,
+            forced_next_location_y_dist=forced_next_pos_y_dist,
             randomize_next_location=randomize_next_location,
             mask_to_last_step=mask_to_last_step,
         )
+
+    def _get_dummy_dist_for_pos(self, forced_next_location):
+        b = forced_next_location.size(0)
+        forced_next_pos_x_dist, forced_next_pos_y_dist = torch.zeros(
+                (b, self.image_dim), device=forced_next_location.device
+            ), torch.zeros((b, self.image_dim), device=forced_next_location.device)
+        f = torch.floor(
+                forced_next_location * (self.image_dim / 2) + (self.image_dim / 2)
+            ).long().clamp(0, self.image_dim - 1)
+        forced_next_pos_x_dist[torch.arange(b), f[:, 0]] = 1.0
+        forced_next_pos_y_dist[torch.arange(b), f[:, 1]] = 1.0
+
+        return forced_next_pos_x_dist, forced_next_pos_y_dist
+
 
     def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
         b, c, h, w = x.size()
@@ -1166,17 +1226,21 @@ class FoVAE(pl.LightningModule):
             for i, v in enumerate(next_patch_kl_divs_by_layer):
                 self._epoch_npp_kl_history[i].append(v.detach().cpu().numpy())
 
-        if batch_idx == 0:
-            # batch_size = x.size(0)
-            self.run_generalization_suite(
-                batch_size=16,
-                predict_foveation_path=False,
-                resize_pre=self.trainer.datamodule.resize,
-            )
+        # if batch_idx == 0:
+        #     # batch_size = x.size(0)
+        #     self.run_generalization_suite(
+        #         batch_size=16,
+        #         predict_foveation_path=False,
+        #         resize_pre=self.trainer.datamodule.resize,
+        #     )
 
-        fov_locations = torch.stack(
-            forward_out["step_vars"]["patch_positions"], dim=0
-        ).cpu()  # (n_steps, b, 2)
+        fov_locations_x = torch.stack([g[0].argmax(dim=-1) for g in forward_out["step_vars"]["patch_positions"]], dim=0).cpu()
+        fov_locations_y = torch.stack([g[1].argmax(dim=-1) for g in forward_out["step_vars"]["patch_positions"]], dim=0).cpu()
+
+        fov_locations = torch.cat(
+            (fov_locations_x.unsqueeze(-1), fov_locations_y.unsqueeze(-1)), dim=-1
+        )
+
         fov_locations = fov_locations.permute(1, 0, 2)  # (b, n_steps, 2)
 
         if not hasattr(self, "_epoch_fov_locations"):

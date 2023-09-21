@@ -16,11 +16,12 @@ class View(nn.Module):
     def forward(self, tensor):
         return tensor.view(self.size)
 
+
 class FFBlock(nn.Module):
     def __init__(self, in_dim, out_dim, batch_norm=False, weight_norm=False):
         super().__init__()
         self.do_batch_norm = batch_norm
-        if batch_norm:# and i != len(hidden_ff_out_dims) - 1:
+        if batch_norm:  # and i != len(hidden_ff_out_dims) - 1:
             self.bn = nn.BatchNorm1d(in_dim)
 
         self.gelu = nn.GELU()
@@ -40,8 +41,17 @@ class FFBlock(nn.Module):
         x = self.lin(x)
         return x
 
+
 class FFNet(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden_ff_out_dims=None, batch_norm=False, weight_norm=False, skip_connection=False):
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+        hidden_ff_out_dims=None,
+        batch_norm=False,
+        weight_norm=False,
+        skip_connection=False,
+    ):
         super().__init__()
         # assert not (batch_norm and weight_norm), "Cannot have both batch and weight norm"
         self.out_dim = out_dim
@@ -56,7 +66,9 @@ class FFNet(nn.Module):
         stack = []
         last_out_dim = in_dim
         for i, nn_out_dim in enumerate(hidden_ff_out_dims):
-            stack.append(FFBlock(last_out_dim, nn_out_dim, batch_norm=batch_norm, weight_norm=weight_norm))
+            stack.append(
+                FFBlock(last_out_dim, nn_out_dim, batch_norm=batch_norm, weight_norm=weight_norm)
+            )
             last_out_dim = nn_out_dim
 
         self.encoder = nn.Sequential(*stack)
@@ -341,6 +353,7 @@ class LadderVAE(nn.Module):
 class NextPatchPredictor(nn.Module):
     def __init__(
         self,
+        image_dim: int,
         ladder_vae: LadderVAE,
         z_dims: List[int],
         embed_dim: int = 256,
@@ -357,12 +370,13 @@ class NextPatchPredictor(nn.Module):
         self.ladder_vae = deepcopy(ladder_vae)
         self.ladder_vae.generative_layers = ladder_vae.generative_layers
 
+        self.image_dim = image_dim
         self.z_dims = z_dims
         self.do_lateral_connections = do_lateral_connections
         self.do_sigmoid_next_location = do_sigmoid_next_location
 
         self.top_z_predictor = VisionTransformer(
-            input_dim=z_dims[-1] + 2,  # 2 for concatenated next position
+            input_dim=z_dims[-1] + 2 * image_dim,  # 2 for concatenated next position
             output_dim=z_dims[-1] * 2,
             embed_dim=embed_dim,
             hidden_dim=hidden_dim,
@@ -374,7 +388,7 @@ class NextPatchPredictor(nn.Module):
 
         self.next_location_predictor = VisionTransformer(
             input_dim=z_dims[-1],
-            output_dim=2 * 2,
+            output_dim=image_dim * 2,
             embed_dim=embed_dim,
             hidden_dim=hidden_dim,
             num_heads=num_heads,
@@ -389,12 +403,20 @@ class NextPatchPredictor(nn.Module):
         self,
         patch_step_zs: List[List[torch.Tensor]],
         curr_patch_ladder_outputs: List[torch.Tensor],
-        forced_next_location: torch.Tensor = None,
+        forced_next_location_x_dist: torch.Tensor = None,
+        forced_next_location_y_dist: torch.Tensor = None,
         randomize_next_location: torch.Tensor = None,
         mask_to_last_step: bool = False,
     ):
         # patch_step_zs: n_steps_so_far x (n_levels from low to high) x (b, dim)
         # highest-level z is the last element of the list
+
+        if (forced_next_location_x_dist is not None) != (
+            forced_next_location_y_dist is not None
+        ):
+            raise ValueError(
+                "Must provide both or neither of forced_next_location_x_dist and forced_next_location_y_dist"
+            )
 
         n_steps = len(patch_step_zs)
         n_levels = len(patch_step_zs[0])
@@ -408,19 +430,26 @@ class NextPatchPredictor(nn.Module):
         else:
             mask = None
 
-        if forced_next_location is not None:
-            next_pos, next_pos_mu, next_pos_std = forced_next_location, None, None
+        if forced_next_location_x_dist is not None and forced_next_location_y_dist is not None:
+            next_pos_x_dist, next_pos_y_dist = (
+                forced_next_location_x_dist,
+                forced_next_location_y_dist,
+            )
         else:
-            next_pos, next_pos_mu, next_pos_std = self.pred_next_location(patch_step_zs, mask=mask)
+            next_pos_x_dist, next_pos_y_dist = self.pred_next_location(patch_step_zs, mask=mask)
 
         # randomize next location for those that are masked to true in randomize_next_location
+        # TODO: test
         if randomize_next_location is not None:
-            next_pos_rand = self._get_random_foveation_pos(b, device=device)
-            next_pos = torch.where(randomize_next_location[:, None], next_pos_rand, next_pos)
+            next_pos_rand_x = self._get_random_foveation_pos(b, device=device)
+            next_pos_rand_y = self._get_random_foveation_pos(b, device=device)
+            next_pos_x_dist = torch.where(randomize_next_location[:, None], next_pos_rand_x, next_pos_x_dist)
+            next_pos_y_dist = torch.where(randomize_next_location[:, None], next_pos_rand_y, next_pos_y_dist)
 
         next_patch_gen_dict = self.generate_next_patch_zs(
             patch_step_zs,
-            next_pos,
+            next_pos_x_dist,
+            next_pos_y_dist,
             curr_patch_ladder_outputs=curr_patch_ladder_outputs,
             mask=mask,
         )
@@ -428,9 +457,9 @@ class NextPatchPredictor(nn.Module):
         return dict(
             generation=next_patch_gen_dict,
             position=dict(
-                next_pos=next_pos,
-                next_pos_mu=next_pos_mu,
-                next_pos_std=next_pos_std,
+                # next_pos=next_pos,
+                next_pos_x_dist=next_pos_x_dist,
+                next_pos_y_dist=next_pos_y_dist,
             ),
         )
 
@@ -439,45 +468,58 @@ class NextPatchPredictor(nn.Module):
 
         prev_top_zs = self._get_zs_from_level(patch_step_zs, Z_LEVEL_TO_PRED_LOC)
         pred = self.next_location_predictor(prev_top_zs, mask=mask)
-        next_loc_mu, next_loc_raw_logstd = pred[:, :2], pred[:, 2:]
 
-        # TODO: make params for this
-        _, next_loc_std = norm_raw_logstd(next_loc_raw_logstd, "bounded", self.loc_std_min, 1.0)
+        next_pos_x_dist, next_pos_y_dist = pred[:, : self.image_dim], pred[:, self.image_dim :]
 
-        next_loc = reparam_sample(next_loc_mu, next_loc_std)
+        # gumbel-softmax
+        # TODO: make param for tau
+        next_pos_x_dist = torch.nn.functional.gumbel_softmax(next_pos_x_dist, tau=1, hard=False)
+        next_pos_y_dist = torch.nn.functional.gumbel_softmax(next_pos_y_dist, tau=1, hard=False)
 
+        # next_loc_mu, next_loc_raw_logstd = pred[:, :2], pred[:, 2:]
+
+        # # TODO: make params for this
+        # _, next_loc_std = norm_raw_logstd(next_loc_raw_logstd, "bounded", self.loc_std_min, 1.0)
+
+        # next_loc = reparam_sample(next_loc_mu, next_loc_std)
+
+        # next_loc = torch.clamp(next_loc, -100, 100) # ???
         # if self.do_sigmoid_next_location:
-        #     next_loc = nn.functional.sigmoid(next_loc) * 4 - 2
+        #     next_loc = nn.functional.sigmoid(next_loc) * 2 - 1
         # # else:
-        # next_loc = torch.clamp(next_loc, -2, 2)
-        if self.do_sigmoid_next_location:
-            next_loc = nn.functional.sigmoid(next_loc) * 2 - 1
-        # else:
-        next_loc = torch.clamp(next_loc, -1, 1)
-        return (
-            next_loc,
-            next_loc_mu,
-            next_loc_std,
-        )
+        # next_loc = torch.clamp(next_loc, -1, 1)
+        # return (
+        #     next_loc,
+        #     next_loc_mu,
+        #     next_loc_std,
+        # )
+        return next_pos_x_dist, next_pos_y_dist
 
     def generate_next_patch_zs(
         self,
         patch_step_zs: List[List[torch.Tensor]],
-        next_loc: torch.Tensor,
+        next_pos_x_dist: torch.Tensor,
+        next_pos_y_dist: torch.Tensor,
         curr_patch_ladder_outputs: Optional[List[torch.Tensor]] = None,
         mask=None,
     ):
         n_steps = len(patch_step_zs)
         # n_levels = len(patch_step_zs[0])
         b = patch_step_zs[0][0].size(0)
-        assert next_loc.size() == torch.Size([b, 2]), "next_loc should be (b, 2)"
+        assert (
+            next_pos_x_dist.size() == next_pos_y_dist.size() == torch.Size([b, self.image_dim])
+        ), f"next_loc should be (b, {self.image_dim})"
 
         Z_LEVEL_TO_PRED_PATCH = -1
 
         prev_top_zs = self._get_zs_from_level(patch_step_zs, Z_LEVEL_TO_PRED_PATCH)
         # concatenate next patch pos to each z, TODO: maybe add as extra token instead?
         prev_top_zs_with_pos = torch.cat(
-            (prev_top_zs, next_loc.unsqueeze(1).repeat(1, n_steps, 1)),
+            (
+                prev_top_zs,
+                next_pos_x_dist.unsqueeze(1).repeat(1, n_steps, 1),
+                next_pos_y_dist.unsqueeze(1).repeat(1, n_steps, 1),
+            ),
             dim=2,
         )
 
@@ -517,5 +559,7 @@ class NextPatchPredictor(nn.Module):
         return s
 
     def _get_random_foveation_pos(self, batch_size: int, device: torch.device = None):
-        return torch.rand((batch_size, 2), device=device) * 2 - 1
+        p = torch.zeros((batch_size, self.image_dim), device=device)
+        p[:, torch.randint(0, self.image_dim, (batch_size,))] = 1.0
+        return p
         # return torch.rand((batch_size, 2), device=device) * 4 - 2
