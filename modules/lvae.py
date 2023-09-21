@@ -450,7 +450,6 @@ class NextPatchPredictor(nn.Module):
         #     next_loc = nn.functional.sigmoid(next_loc) * 4 - 2
         # # else:
         # next_loc = torch.clamp(next_loc, -2, 2)
-        next_loc = torch.clamp(next_loc, -100, 100) # ???
         if self.do_sigmoid_next_location:
             next_loc = nn.functional.sigmoid(next_loc) * 2 - 1
         # else:

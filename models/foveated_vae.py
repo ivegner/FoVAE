@@ -345,6 +345,9 @@ class FoVAE(pl.LightningModule):
             #     next_pos = torch.sigmoid(next_pos) * 2 - 1
 
             # foveate to next position
+            if torch.isnan(next_pos).any():
+                next_pos = torch.nan_to_num(next_pos, nan=0.0, posinf=0.0, neginf=0.0)
+
             next_patch = get_patch_from_pos(next_pos)
             assert torch.is_same_size(next_patch, curr_patch)
             patches.append(next_patch)
