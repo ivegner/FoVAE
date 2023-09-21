@@ -446,6 +446,10 @@ class NextPatchPredictor(nn.Module):
 
         next_loc = reparam_sample(next_loc_mu, next_loc_std)
 
+        # if self.do_sigmoid_next_location:
+        #     next_loc = nn.functional.sigmoid(next_loc) * 4 - 2
+        # # else:
+        # next_loc = torch.clamp(next_loc, -2, 2)
         if self.do_sigmoid_next_location:
             next_loc = nn.functional.sigmoid(next_loc) * 2 - 1
         # else:
@@ -514,3 +518,4 @@ class NextPatchPredictor(nn.Module):
 
     def _get_random_foveation_pos(self, batch_size: int, device: torch.device = None):
         return torch.rand((batch_size, 2), device=device) * 2 - 1
+        # return torch.rand((batch_size, 2), device=device) * 4 - 2

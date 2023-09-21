@@ -328,12 +328,19 @@ class FoVAE(pl.LightningModule):
                 gen_patch_dicts.append(next_patch_dict)
 
                 next_pos = next_patch_dict["position"]["next_pos"]
+                # next_pos_offset = next_patch_dict["position"]["next_pos"]
             elif self.frac_random_foveation == 1.0:
                 next_pos = self._get_random_foveation_pos(batch_size=b)
+                # next_pos_offset = self._get_random_foveation_pos(batch_size=b)
             else:
                 raise ValueError(
                     "Must do either next patch prediction or frac_random_foveation=1.0"
                 )
+
+            # if True: # do relative positions
+            #     next_pos = patch_positions[-1] + next_pos_offset
+            #     # sigmoid to keep positions in range [-1, 1]
+            #     next_pos = torch.sigmoid(next_pos) * 2 - 1
 
             # foveate to next position
             next_patch = get_patch_from_pos(next_pos)
@@ -1042,7 +1049,7 @@ class FoVAE(pl.LightningModule):
         ring_radius = self.patch_dim // 2 - self.fovea_radius
         fovea_dim = self.fovea_radius * 2
 
-        fovea = p[:, :, ring_radius:-ring_radius, ring_radius:-ring_radius]
+        fovea = p[:, :, ring_radius:(-ring_radius or None), ring_radius:(-ring_radius or None)]
         if patch.ndim == 2:
             return fovea.reshape(-1, self.num_channels * fovea_dim * fovea_dim)
         else:

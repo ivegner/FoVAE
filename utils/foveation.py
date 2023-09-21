@@ -46,19 +46,23 @@ def get_generic_sampled_ring_indices(
 
     # if peri_ring_radii is None:
     # get peri indices
-    a = np.exp((np.log(max_ring_radius / fovea_radius)) / num_peri_rings_to_attempt)
-    peri_ring_radii = np.floor(
-        [fovea_radius * a**i for i in range(1, num_peri_rings_to_attempt + 1)]
-    )
-    eligible_radius_mask = np.array(
-        [fovea_radius < r <= max_ring_radius for r in peri_ring_radii]
-    ).astype(bool)
-    peri_ring_radii = peri_ring_radii[eligible_radius_mask].astype(int)
-    # else:
-    #     assert isinstance(peri_ring_radii, List)
-    #     assert all([isinstance(r, int) for r in peri_ring_radii])
-    #     assert all([fovea_radius < r <= max_ring_radius for r in peri_ring_radii])
-    num_peri_rings = len(peri_ring_radii)
+    if num_peri_rings_to_attempt > 0:
+        a = np.exp((np.log(max_ring_radius / fovea_radius)) / num_peri_rings_to_attempt)
+        peri_ring_radii = np.floor(
+            [fovea_radius * a**i for i in range(1, num_peri_rings_to_attempt + 1)]
+        )
+        eligible_radius_mask = np.array(
+            [fovea_radius < r <= max_ring_radius for r in peri_ring_radii]
+        ).astype(bool)
+        peri_ring_radii = peri_ring_radii[eligible_radius_mask].astype(int)
+        # else:
+        #     assert isinstance(peri_ring_radii, List)
+        #     assert all([isinstance(r, int) for r in peri_ring_radii])
+        #     assert all([fovea_radius < r <= max_ring_radius for r in peri_ring_radii])
+        num_peri_rings = len(peri_ring_radii)
+    else:
+        peri_ring_radii = []
+        num_peri_rings = 0
 
     foveated_im_dim = 2 * (fovea_radius + num_peri_rings)
 
