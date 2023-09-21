@@ -684,7 +684,11 @@ class FoVAE(pl.LightningModule):
                 # regardless of whether the model is using soft-foveation
                 next_pos_x_dist, next_pos_y_dist = self._get_dummy_dist_for_pos(pos)
                 patch, _fov_memo = self._foveate_to_loc(
-                    image, next_pos_x_dist, next_pos_y_dist, do_soft_foveation=False, _fov_memo=_fov_memo
+                    image,
+                    next_pos_x_dist,
+                    next_pos_y_dist,
+                    do_soft_foveation=False,
+                    _fov_memo=_fov_memo,
                 )
                 return patch
 
@@ -970,7 +974,9 @@ class FoVAE(pl.LightningModule):
         b = prev_zs[0][0].size(0)
 
         if forced_next_location is not None:
-            forced_next_pos_x_dist, forced_next_pos_y_dist = self._get_dummy_dist_for_pos(forced_next_location)
+            forced_next_pos_x_dist, forced_next_pos_y_dist = self._get_dummy_dist_for_pos(
+                forced_next_location
+            )
         else:
             forced_next_pos_x_dist, forced_next_pos_y_dist = None, None
 
@@ -992,16 +998,17 @@ class FoVAE(pl.LightningModule):
     def _get_dummy_dist_for_pos(self, forced_next_location):
         b = forced_next_location.size(0)
         forced_next_pos_x_dist, forced_next_pos_y_dist = torch.zeros(
-                (b, self.image_dim), device=forced_next_location.device
-            ), torch.zeros((b, self.image_dim), device=forced_next_location.device)
-        f = torch.floor(
-                forced_next_location * (self.image_dim / 2) + (self.image_dim / 2)
-            ).long().clamp(0, self.image_dim - 1)
+            (b, self.image_dim), device=forced_next_location.device
+        ), torch.zeros((b, self.image_dim), device=forced_next_location.device)
+        f = (
+            torch.floor(forced_next_location * (self.image_dim / 2) + (self.image_dim / 2))
+            .long()
+            .clamp(0, self.image_dim - 1)
+        )
         forced_next_pos_x_dist[torch.arange(b), f[:, 0]] = 1.0
         forced_next_pos_y_dist[torch.arange(b), f[:, 1]] = 1.0
 
         return forced_next_pos_x_dist, forced_next_pos_y_dist
-
 
     def _add_pos_encodings_to_img_batch(self, x: torch.Tensor):
         b, c, h, w = x.size()
@@ -1234,8 +1241,12 @@ class FoVAE(pl.LightningModule):
                 resize_pre=self.trainer.datamodule.resize,
             )
 
-        fov_locations_x = torch.stack([g[0].argmax(dim=-1) for g in forward_out["step_vars"]["patch_positions"]], dim=0).cpu()
-        fov_locations_y = torch.stack([g[1].argmax(dim=-1) for g in forward_out["step_vars"]["patch_positions"]], dim=0).cpu()
+        fov_locations_x = torch.stack(
+            [g[0].argmax(dim=-1) for g in forward_out["step_vars"]["patch_positions"]], dim=0
+        ).cpu()
+        fov_locations_y = torch.stack(
+            [g[1].argmax(dim=-1) for g in forward_out["step_vars"]["patch_positions"]], dim=0
+        ).cpu()
 
         fov_locations = torch.cat(
             (fov_locations_x.unsqueeze(-1), fov_locations_y.unsqueeze(-1)), dim=-1

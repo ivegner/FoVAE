@@ -294,7 +294,14 @@ def _visualize_foveations(
         #     .view(-1, model.num_channels, model.patch_dim, model.patch_dim)[:n_to_plot, -2:]
         #     .mean(dim=(2, 3))
         # )
-        positions = step_patch_positions[step].to(model.device)
+        fov_locations_x = torch.stack([g[0].argmax(dim=-1) for g in step_patch_positions], dim=0)
+        fov_locations_y = torch.stack([g[1].argmax(dim=-1) for g in step_patch_positions], dim=0)
+
+        positions = torch.cat(
+            (fov_locations_x.unsqueeze(-1), fov_locations_y.unsqueeze(-1)), dim=-1
+        ).to(model.device)[step]
+
+        # positions = step_patch_positions[step].to(model.device)
         gaussian_filter_params = recursive_to(
             model._move_default_filter_params_to_loc(positions, (h, w), pad_offset=None),
             "cpu",
@@ -379,6 +386,7 @@ def _visualize_foveations(
     # )
     # if model.do_next_patch_prediction:
     #     del (pred_patches, pred_pos)
+
 
 def plot_heatmap(x: np.ndarray, ax=None, item_labels: bool = True, title=None):
     if ax is None:
