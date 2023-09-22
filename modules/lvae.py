@@ -407,6 +407,7 @@ class NextPatchPredictor(nn.Module):
         forced_next_location_y_dist: torch.Tensor = None,
         randomize_next_location: torch.Tensor = None,
         mask_to_last_step: bool = False,
+        gs_tau=1.0
     ):
         # patch_step_zs: n_steps_so_far x (n_levels from low to high) x (b, dim)
         # highest-level z is the last element of the list
@@ -436,7 +437,7 @@ class NextPatchPredictor(nn.Module):
                 forced_next_location_y_dist,
             )
         else:
-            next_pos_x_dist, next_pos_y_dist = self.pred_next_location(patch_step_zs, mask=mask)
+            next_pos_x_dist, next_pos_y_dist = self.pred_next_location(patch_step_zs, tau=gs_tau, mask=mask)
 
         # randomize next location for those that are masked to true in randomize_next_location
         # TODO: test
@@ -463,7 +464,7 @@ class NextPatchPredictor(nn.Module):
             ),
         )
 
-    def pred_next_location(self, patch_step_zs: List[List[torch.Tensor]], mask=None):
+    def pred_next_location(self, patch_step_zs: List[List[torch.Tensor]], tau=1.0, mask=None):
         Z_LEVEL_TO_PRED_LOC = -1  # TODO: make this a param, and maybe multiple levels
 
         prev_top_zs = self._get_zs_from_level(patch_step_zs, Z_LEVEL_TO_PRED_LOC)
@@ -473,8 +474,8 @@ class NextPatchPredictor(nn.Module):
 
         # gumbel-softmax
         # TODO: make param for tau
-        next_pos_x_dist = torch.nn.functional.gumbel_softmax(next_pos_x_dist, tau=1, hard=False)
-        next_pos_y_dist = torch.nn.functional.gumbel_softmax(next_pos_y_dist, tau=1, hard=False)
+        next_pos_x_dist = torch.nn.functional.gumbel_softmax(next_pos_x_dist, tau=tau, hard=False)
+        next_pos_y_dist = torch.nn.functional.gumbel_softmax(next_pos_y_dist, tau=tau, hard=False)
 
         # next_loc_mu, next_loc_raw_logstd = pred[:, :2], pred[:, 2:]
 

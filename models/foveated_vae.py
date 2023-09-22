@@ -95,6 +95,9 @@ class FoVAE(pl.LightningModule):
         npp_do_mask_to_last_step=False,
         npp_do_flag_last_step=False,
         npp_do_curiosity=False,
+        npp_gs_tau = 1.0,
+        npp_gs_tau_anneal_rate = 0.997,
+        npp_gs_tau_min = 0.1,
         image_reconstruction_frac=1.0,
     ):
         super().__init__()
@@ -215,6 +218,9 @@ class FoVAE(pl.LightningModule):
         self.do_lateral_connections = do_lateral_connections
         self.npp_do_mask_to_last_step = npp_do_mask_to_last_step
         self.npp_do_curiosity = npp_do_curiosity
+        self.npp_gs_tau = npp_gs_tau
+        self.npp_gs_tau_anneal_rate = npp_gs_tau_anneal_rate
+        self.npp_gs_tau_min = npp_gs_tau_min
         self.do_soft_foveation = do_soft_foveation
         if do_soft_foveation:
             self.soft_foveation_grid_size = soft_foveation_grid_size
@@ -993,6 +999,7 @@ class FoVAE(pl.LightningModule):
             forced_next_location_y_dist=forced_next_pos_y_dist,
             randomize_next_location=randomize_next_location,
             mask_to_last_step=mask_to_last_step,
+            gs_tau=self.npp_gs_tau,
         )
 
     def _get_dummy_dist_for_pos(self, forced_next_location):
@@ -1612,6 +1619,10 @@ class FoVAE(pl.LightningModule):
                     f = os.path.join(MEDIA_TMP, f)
                     if time.time() - os.path.getmtime(f) > 30 * 60:
                         os.remove(f)
+
+        # anneal npp_gs_tau
+        self.npp_gs_tau = max(self.npp_gs_tau * self.npp_gs_tau_anneal_rate, self.npp_gs_tau_min)
+        self.log("npp_gs_tau", self.npp_gs_tau, on_epoch=True, logger=False)
 
         return k
 
