@@ -874,7 +874,7 @@ class FoVAE(pl.LightningModule):
             # soft_patches: (b, image_dim*image_dim, c, h, w)
             # foveated_image: (b, c, h, w)
             # weights given by cross product of x and y distributions
-            weights = (next_pos_x_dist.unsqueeze(1) * next_pos_y_dist.unsqueeze(2)).view(b, -1)
+            weights = (next_pos_y_dist.unsqueeze(1) * next_pos_x_dist.unsqueeze(2)).view(b, -1)
             assert weights.size() == torch.Size([b, self.image_dim * self.image_dim])
             foveated_image = torch.einsum("bg,bgchw->bchw", weights, soft_patches)
 
