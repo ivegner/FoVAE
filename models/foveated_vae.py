@@ -901,7 +901,7 @@ class FoVAE(pl.LightningModule):
         _fov_memo["orig_image"] = image
         _fov_memo["padded_image"] = padded_image
         _fov_memo["pad_offset"] = pad_offset
-        if do_soft_foveation:
+        if True: # do_soft_foveation:
             _fov_memo["soft_patches"] = soft_patches
             _fov_memo["all_locs"] = all_locs
             # _fov_memo["channel_mask"] = channel_mask
