@@ -220,10 +220,12 @@ class FoVAE(pl.LightningModule):
         self.npp_do_mask_to_last_step = npp_do_mask_to_last_step
         self.npp_do_curiosity = npp_do_curiosity
         self.npp_gs_tau = nn.Parameter(
-            torch.tensor([npp_gs_tau]).float(), requires_grad=do_train_npp_gs_tau
+            torch.tensor(npp_gs_tau).float(), requires_grad=do_train_npp_gs_tau
         )
         self.npp_gs_tau_anneal_rate = npp_gs_tau_anneal_rate
-        self.npp_gs_tau_min = npp_gs_tau_min
+        self.npp_gs_tau_min = nn.Parameter(
+            torch.tensor(npp_gs_tau_min).float(), requires_grad=False
+        )
         self.do_soft_foveation = do_soft_foveation
         if do_soft_foveation:
             self.soft_foveation_grid_size = soft_foveation_grid_size
@@ -1625,7 +1627,10 @@ class FoVAE(pl.LightningModule):
                         os.remove(f)
 
         # anneal npp_gs_tau
-        self.npp_gs_tau = max(self.npp_gs_tau * self.npp_gs_tau_anneal_rate, self.npp_gs_tau_min)
+
+        self.npp_gs_tau = torch.max(
+            self.npp_gs_tau * self.npp_gs_tau_anneal_rate, self.npp_gs_tau_min
+        )
 
         return k
 
