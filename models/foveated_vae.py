@@ -1176,6 +1176,7 @@ class FoVAE(pl.LightningModule):
         # print("Rec loss", forward_out["losses"]["image_reconstruction_loss"])
         # self.log("train_total_loss", total_loss, prog_bar=True)
         self.log_dict({"train/" + k: v.detach().item() for k, v in forward_out["losses"].items()})
+        self.log("npp_gs_tau", self.npp_gs_tau, on_epoch=True, logger=False)
         # patch_noise_std_mean = self.patch_noise_std.detach().mean().item()
         # self.log("patch_noise_std_mean", patch_noise_std_mean, logger=True, on_step=True)
 
@@ -1622,7 +1623,6 @@ class FoVAE(pl.LightningModule):
 
         # anneal npp_gs_tau
         self.npp_gs_tau = max(self.npp_gs_tau * self.npp_gs_tau_anneal_rate, self.npp_gs_tau_min)
-        self.log("npp_gs_tau", self.npp_gs_tau, on_epoch=True, logger=False)
 
         return k
 
