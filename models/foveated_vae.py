@@ -1628,7 +1628,7 @@ class FoVAE(pl.LightningModule):
 
         # anneal npp_gs_tau
 
-        self.npp_gs_tau = torch.max(
+        self.npp_gs_tau.data = torch.max(
             self.npp_gs_tau * self.npp_gs_tau_anneal_rate, self.npp_gs_tau_min
         )
 
