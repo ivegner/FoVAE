@@ -1352,7 +1352,7 @@ class FoVAE(pl.LightningModule):
             for i in range(locs.size(1)):
                 color = plt.cm.rainbow(i / locs.size(1))
                 ax.scatter(
-                    locs[:, i, 0], locs[:, i, 1], s=1, alpha=min(1, 200 / len(locs)), color=color
+                    locs[:, i, 0], locs[:, i, 1], s=1, alpha=min(1, max(0.05, 200 / len(locs))), color=color
                 )
             ax.set_xlim(0, self.image_dim - 1)
             ax.set_ylim(0, self.image_dim - 1)
