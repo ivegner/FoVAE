@@ -95,9 +95,10 @@ class FoVAE(pl.LightningModule):
         npp_do_mask_to_last_step=False,
         npp_do_flag_last_step=False,
         npp_do_curiosity=False,
-        npp_gs_tau = 1.0,
-        npp_gs_tau_anneal_rate = 0.997,
-        npp_gs_tau_min = 0.1,
+        npp_gs_tau=1.0,
+        npp_gs_tau_anneal_rate=0.997,
+        npp_gs_tau_min=0.1,
+        do_train_npp_gs_tau=False,
         image_reconstruction_frac=1.0,
     ):
         super().__init__()
@@ -218,7 +219,9 @@ class FoVAE(pl.LightningModule):
         self.do_lateral_connections = do_lateral_connections
         self.npp_do_mask_to_last_step = npp_do_mask_to_last_step
         self.npp_do_curiosity = npp_do_curiosity
-        self.npp_gs_tau = npp_gs_tau
+        self.npp_gs_tau = nn.Parameter(
+            torch.tensor([npp_gs_tau]).float(), requires_grad=do_train_npp_gs_tau
+        )
         self.npp_gs_tau_anneal_rate = npp_gs_tau_anneal_rate
         self.npp_gs_tau_min = npp_gs_tau_min
         self.do_soft_foveation = do_soft_foveation
@@ -907,7 +910,7 @@ class FoVAE(pl.LightningModule):
         _fov_memo["orig_image"] = image
         _fov_memo["padded_image"] = padded_image
         _fov_memo["pad_offset"] = pad_offset
-        if True: # do_soft_foveation:
+        if True:  # do_soft_foveation:
             _fov_memo["soft_patches"] = soft_patches
             _fov_memo["all_locs"] = all_locs
             # _fov_memo["channel_mask"] = channel_mask
@@ -1176,7 +1179,7 @@ class FoVAE(pl.LightningModule):
         # print("Rec loss", forward_out["losses"]["image_reconstruction_loss"])
         # self.log("train_total_loss", total_loss, prog_bar=True)
         self.log_dict({"train/" + k: v.detach().item() for k, v in forward_out["losses"].items()})
-        self.log("npp_gs_tau", self.npp_gs_tau, on_epoch=True, logger=False)
+        self.log("npp_gs_tau", self.npp_gs_tau, logger=True)
         # patch_noise_std_mean = self.patch_noise_std.detach().mean().item()
         # self.log("patch_noise_std_mean", patch_noise_std_mean, logger=True, on_step=True)
 

@@ -53,4 +53,5 @@ model:
   npp_gs_tau: 1.0
   npp_gs_tau_anneal_rate: 0.997
   npp_gs_tau_min: 0.1
+  do_train_npp_gs_tau: false
   image_reconstruction_frac: 0.1
