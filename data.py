@@ -20,6 +20,10 @@ class ImageDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.persistent_workers = persistent_workers
+
+        self.dataset_name = dataset
+        self.resize = resize
+
         _transforms = [transforms.ToTensor()]
         if resize:
             _transforms.insert(0, transforms.Resize(resize, antialias=True))

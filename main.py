@@ -30,7 +30,7 @@ class MyLightningCLI(LightningCLI):
             return f"checkpoints/{run_id}"
 
         run_id = None
-        if c.resume_run_id and subcommand == "fit":
+        if False and c.resume_run_id and subcommand == "fit":
             run_id = c.resume_run_id
             c.trainer.logger.init_args.resume = "must"
         else:
