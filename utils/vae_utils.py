@@ -224,7 +224,9 @@ def reparam_sample(
         print("mu:", mu.max(), mu.min())
         # print("raw_logstd:", raw_logstd.max(), raw_logstd.min())
         print("std:", std.max(), std.min())
-        return torch.empty_like(mu).fill_(torch.nan)
+        mu = torch.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
+        std = torch.nan_to_num(std, nan=1.0, posinf=1.0, neginf=1.0)
+        return _reparam_sample(mu, std)
 
 
 def norm_raw_logstd(
