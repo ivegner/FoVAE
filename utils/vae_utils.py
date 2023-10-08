@@ -226,7 +226,7 @@ def reparam_sample(
         print("std:", std.max(), std.min())
         mu = torch.nan_to_num_(mu, nan=0.0, posinf=0.0, neginf=0.0)
         std = torch.nan_to_num_(std, nan=1.0, posinf=1.0, neginf=1.0)
-        std = torch.clamp(std, min=1e-6)
+        std = torch.clamp_(std, min=1e-6)
         return _reparam_sample(mu, std)
 
 
